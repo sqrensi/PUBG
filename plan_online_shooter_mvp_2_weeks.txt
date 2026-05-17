@@ -1,0 +1,482 @@
+ПЛАН: MVP ОНЛАЙН-ШУТЕРА (UNITY) НА 2 НЕДЕЛИ
+===========================================
+
+Цель
+----
+Собрать играбельный прототип онлайн-шутера в стиле PUBG на Unity с:
+- выделенным сервером;
+- очередью поиска матча и простым матчмейкингом;
+- лобби в главном меню с кнопкой Start;
+- видом от первого лица (локальный игрок видит только свои руки);
+- упрощенной моделью персонажа для других игроков (палочки вместо тела/конечностей + белая маска вместо головы);
+- системой состояний оружия;
+- инвентарем, лутом и системой HP.
+
+
+1) Границы MVP (чтобы уложиться в 14 дней)
+------------------------------------------
+- Одна карта (небольшая/средняя, без транспорта и без сужающейся зоны).
+- Один режим: упрощенный deathmatch / last man standing на 8-16 игроков.
+- 1-2 оружия (например, автомат + пистолет).
+- Один расходник: аптечка.
+- 1-2 типа патронов.
+- Только соло-очередь.
+- Простой матчмейкинг по времени ожидания и количеству игроков.
+- Без рейтинга, без античита, без косметики, без мета-прогрессии.
+
+
+2) Архитектура верхнего уровня
+------------------------------
+Компоненты:
+
+1. Unity Client
+   - Главное меню и UI.
+   - Очередь и флоу подключения.
+   - FPS-управление и камера.
+   - UI оружия, инвентаря и HP.
+
+2. Dedicated Game Server (Unity headless build)
+   - Авторитетная логика матча.
+   - Урон, HP, смерть/респаун.
+   - Сетевые сущности лута и авторитет инвентаря.
+   - Жизненный цикл матча.
+
+3. Queue + Matchmaker Service (отдельный backend, например Node.js/Go)
+   - Enqueue / dequeue тикетов.
+   - Создание матча при наборе игроков или таймауте.
+   - Выдача endpoint игрового сервера (IP:PORT).
+
+4. Хранилище состояния (минимальное)
+   - In-memory или Redis для статусов очереди.
+
+Флоу подключения:
+Главное меню -> Start -> QueueService.Enqueue -> polling статуса тикета
+-> "Матч найден" -> получение endpoint -> подключение к выделенному серверу.
+
+
+3) Ключевые технические решения
+-------------------------------
+- Сервер-авторитет по бою:
+  сервер подтверждает попадания, применяет урон, обновляет HP и инвентарь.
+- Отзывчивость клиента:
+  локальное предсказание движения/камеры для плавного управления.
+- Разделение представлений:
+  локальный игрок имеет first-person rig рук и оружия;
+  удаленные игроки отображаются упрощенной full-body моделью с белой маской.
+- Оружие как finite state machine:
+  За спиной, В руках (Idle), Прицеливание, Перезарядка, На земле.
+- Лут как сетевые world-entity:
+  каждый предмет на земле имеет item id, количество и таймер исчезновения.
+
+
+4) Модель данных (минимально необходимая)
+-----------------------------------------
+PlayerState:
+- playerId
+- position, rotation
+- hp, isAlive
+- inventoryRef
+- equippedWeaponRef
+
+ItemDefinition (ScriptableObject):
+- itemId
+- type (Weapon / Ammo / Medkit)
+- stackSize
+- worldPrefab
+- icon
+
+Inventory:
+- фиксированный набор слотов
+- быстрые слоты (quick slots)
+- логика стакования и разделения предметов
+
+WeaponState:
+- weaponId
+- currentState (Back/Idle/Aim/Reload/Dropped)
+- ammoInMag
+- ammoReserve
+- fireRate
+- reloadDuration
+
+LootEntity:
+- itemId
+- amount
+- worldPosition
+- despawnTime
+
+MatchTicket:
+- ticketId
+- playerId
+- queueEnterTime
+- status (Queued / Matched / Cancelled / Expired)
+
+
+& "C:\me\unity\ShooterPrototype\Build\Server\My project (12).exe" -batchmode -nographics -logFile "C:\me\unity\ShooterPrototype\server.log"
+cd "c:\me\unity\ShooterPrototype\Backend\QueueService"
+npm.cmd start
+
+5) План выполнения на 14 дней
+-----------------------------
+День 1-2: Базовый каркас проекта
+- Настроить структуру Unity-проекта и сетевой стек.
+- Подготовить headless-сборку выделенного сервера.
+- Создать сцены MainMenu и Game.
+- Сделать базовый флоу кнопки Start с заглушкой подключения.
+Критерий готовности:
+- Клиент запускает главное меню.
+- Выделенный сервер стартует.
+- Клиент может инициировать подключение к серверу.
+
+День 3-4: Очередь и матчмейкинг
+- Реализовать API очереди:
+  enqueue, dequeue, ticket status.
+- Добавить простую логику матчмейкинга:
+  матч создается по достижению min players или по timeout.
+- Возвращать endpoint сервера всем подобранным игрокам.
+Критерий готовности:
+- Нажатие Start отправляет игрока в очередь.
+- Тикет доходит до состояния "матч найден" и выдает endpoint.
+
+День 5-6: Игрок и вид от первого лица
+- Реализовать FPS-контроллер: движение, обзор, прыжок (минимум).
+- Настроить локальный rig рук/оружия для first-person.
+- Настроить модель удаленного игрока: палочки + белая маска.
+- Добавить базовую сетевую синхронизацию трансформов.
+Критерий готовности:
+- Несколько игроков одновременно подключаются и двигаются.
+- Локальный игрок видит только руки, остальных видит как упрощенные модели.
+
+День 7-8: Система оружия и состояния
+- Собрать state machine оружия:
+  За спиной, Idle, Aim, Reload, Dropped.
+- Реализовать стрельбу (простой hitscan).
+- Проверять попадания и урон на сервере.
+- Добавить перезарядку и корректные переходы состояний.
+Критерий готовности:
+- Оружие можно взять, прицелиться, выстрелить, перезарядить и выбросить.
+- Состояния корректно реплицируются другим игрокам.
+
+День 9-10: Инвентарь и лут
+- Реализовать инвентарь со слотами и стаками патронов.
+- Реализовать подбор и выброс предметов.
+- Добавить спавн и сетевую синхронизацию лута на земле.
+- Добавить использование аптечки.
+Критерий готовности:
+- Работает полный цикл:
+  поднял -> положил в инвентарь -> использовал/выбросил -> увидели все клиенты.
+
+День 11: HP, смерть и респаун
+- Сервер-авторитет для HP и смерти.
+- Добавить простую систему респауна (для стабильного MVP).
+- Добавить минимальный kill feed в UI.
+Критерий готовности:
+- Урон корректно изменяет HP.
+- Смерть и респаун стабильно работают в сетевой игре.
+
+День 12: UX матча и устойчивость
+- Экранные состояния: поиск, подключение, ошибка.
+- Обработка дисконнектов и таймаутов.
+- Сгладить заметный сетевой jitter (интерполяция, пороги снапа).
+Критерий готовности:
+- Сквозной пользовательский флоу работает от меню до матча без блокеров.
+
+День 13: Тестирование и фиксы
+- Прогон сценариев: 1 / 2 / 4 / 8 / 16 игроков.
+- Проверка edge cases:
+  пустая очередь, отмена очереди, дисконнект в матче, гонки на луте.
+- Исправление критичных сетевых и геймплейных багов.
+Критерий готовности:
+- Нет блокирующих багов для демонстрации прототипа.
+
+День 14: Полировка и демо-сборка
+- Мини-полировка: звук выстрела/перезарядки, читаемость UI.
+- Финальная сборка клиента и dedicated server.
+- Smoke-тест по чеклисту.
+Критерий готовности:
+- Демо-версия стабильна и пригодна к показу.
+
+
+6) Жесткие ограничения по скоупу
+--------------------------------
+В рамках этого 2-недельного прототипа НЕ делать:
+- масштаб на 100 игроков;
+- сложную баллистику;
+- продвинутую отдачу и модификации оружия;
+- систему сужающейся зоны;
+- транспорт;
+- прогрессию аккаунта и экономику;
+- полноценный античит.
+
+
+7) Критерии успешности MVP
+--------------------------
+Прототип считается успешным, если:
+1. Из MainMenu по кнопке Start игрок входит в очередь и находит матч.
+2. Клиент получает endpoint и автоматически подключается к dedicated server.
+3. Игрок может двигаться, стрелять, прицеливаться, перезаряжаться, лутаться и лечиться.
+4. Состояния оружия работают и корректно синхронизируются по сети.
+5. HP/урон/смерть/респаун работают под серверным авторитетом.
+6. Матч на 8-16 игроков играбелен без критичных десинхронизаций.
+
+
+8) Основные риски и меры снижения
+---------------------------------
+Риск: сеть и синхронизация "съедят" срок.
+Мера: с первого дня держать бой и инвентарь полностью сервер-авторитетными.
+
+Риск: интеграция матчмейкера затянется.
+Мера: оставить только минимальные endpoint (enqueue/status/match result).
+
+Риск: несоответствие first-person и third-person визуала.
+Мера: сразу развести риги и render layers (дни 5-6).
+
+Риск: расползание контента.
+Мера: жестко ограничить контент до 1-2 оружий + патроны + аптечка.
+
+
+9) Рекомендованный рабочий ритм на 2 недели
+--------------------------------------------
+- Ежедневный 15-минутный sync по блокерам и приоритетам.
+- В конце каждого дня: проверка "сегодняшняя сборка играбельна?".
+- Контрольные вехи в дни 7, 10 и 13 (должен быть playable-результат).
+
+Конец файла.
+PLAN: MVP ONLINE SHOOTER (UNITY) - 2 WEEKS
+==========================================
+
+Goal
+----
+Build a playable prototype of an online shooter (PUBG-like style) in Unity with:
+- Dedicated game server
+- Match queue + simple matchmaking
+- Main menu lobby with Start button
+- First-person player view (local player sees only hands)
+- Simplified character model for other players (stick limbs/body + white mask head)
+- Weapon state system
+- Inventory, loot, and HP system
+
+
+1) MVP Scope (to fit 14 days)
+-----------------------------
+- One map (small-medium size, no vehicles, no shrinking zone).
+- One game mode: simple deathmatch / last-man-standing style, 8-16 players.
+- 1-2 weapons (example: AR + pistol).
+- Consumables: medkit.
+- Ammo types: 1-2.
+- Solo queue only.
+- Basic matchmaking by queue wait and player count.
+- No ranked mode, no anti-cheat system, no cosmetics, no advanced progression.
+
+
+2) High-Level Architecture
+--------------------------
+Components:
+1. Unity Client
+   - Main menu UI
+   - Queue flow
+   - FPS controls and camera
+   - Weapon/inventory/health UI
+
+2. Dedicated Game Server (Unity headless build)
+   - Authoritative gameplay logic
+   - Damage and HP
+   - Loot entities and inventory authority
+   - Match state lifecycle
+
+3. Queue + Matchmaker Service (separate backend, e.g. Node.js/Go)
+   - Enqueue / dequeue player tickets
+   - Create match when enough players or timeout reached
+   - Return game server endpoint (IP:PORT)
+
+4. Optional lightweight state store
+   - In-memory / Redis for queue ticket state
+
+Connection flow:
+MainMenu -> Start -> QueueService.Enqueue -> polling ticket status
+-> "Match Found" -> receive server endpoint -> connect to dedicated server.
+
+
+3) Core Technical Decisions
+---------------------------
+- Server-authoritative combat:
+  server validates hits, applies damage, updates HP and inventory.
+- Client-side responsiveness:
+  local movement/camera prediction for smooth controls.
+- View model split:
+  local player has first-person hand rig and weapon rig;
+  remote players use simplified full-body stick model with white mask.
+- Weapon behavior via finite state machine:
+  Back, Idle, Aim, Reload, Dropped.
+- Loot as networked world entities:
+  each item on ground has item id, quantity, and despawn timer.
+
+
+4) Data Model (minimum required)
+--------------------------------
+PlayerState:
+- playerId
+- position, rotation
+- hp, isAlive
+- inventoryRef
+- equippedWeaponRef
+
+ItemDefinition (ScriptableObject):
+- itemId
+- type (Weapon / Ammo / Medkit)
+- stackSize
+- worldPrefab
+- icon
+
+Inventory:
+- fixed slot list
+- quick slots
+- stack and split logic
+
+WeaponState:
+- weaponId
+- currentState (Back/Idle/Aim/Reload/Dropped)
+- ammoInMag
+- ammoReserve
+- fireRate
+- reloadDuration
+
+LootEntity:
+- itemId
+- amount
+- worldPosition
+- despawnTime
+
+MatchTicket:
+- ticketId
+- playerId
+- queueEnterTime
+- status (Queued / Matched / Cancelled / Expired)
+
+
+5) 14-Day Execution Plan
+------------------------
+Day 1-2: Project foundation
+- Set up Unity project structure and networking stack.
+- Configure dedicated server headless build target.
+- Create scenes: MainMenu and Game.
+- Build basic Start button flow with placeholder connection.
+Done criteria:
+- Client launches MainMenu.
+- Dedicated server runs.
+- Client can attempt server connection.
+
+Day 3-4: Queue and matchmaking
+- Implement queue service endpoints:
+  enqueue, dequeue, ticket status.
+- Implement simple matchmaking logic:
+  start match on min players OR timeout.
+- Return server endpoint to matched players.
+Done criteria:
+- Pressing Start puts player into queue.
+- Ticket eventually resolves to server endpoint.
+
+Day 5-6: Player controller and first-person setup
+- FPS controller: move, look, jump (minimal set).
+- Local-only hand/weapon rig for first-person.
+- Remote player character: stick body + white mask head.
+- Basic network sync for transforms.
+Done criteria:
+- Multiple players connect and move.
+- Local sees only hands; others see simplified full model.
+
+Day 7-8: Weapon system and state machine
+- Create weapon state machine:
+  Back, Idle, Aim, Reload, Dropped.
+- Implement shooting (simple hitscan).
+- Perform hit validation and damage on server.
+- Add reload logic and state transitions.
+Done criteria:
+- Weapon can be equipped, aimed, fired, reloaded, and dropped.
+- Remote clients observe state changes.
+
+Day 9-10: Inventory and loot
+- Implement inventory with slots and stackable ammo.
+- Implement pickup/drop interactions.
+- Spawn and sync loot entities in world.
+- Add medkit item usage flow.
+Done criteria:
+- Full loop works:
+  pick up -> inventory -> use/drop -> replicated for all players.
+
+Day 11: HP, death, respawn
+- Server-authoritative HP and death handling.
+- Add simple respawn system (for MVP stability and testing).
+- Add minimal kill feed text UI.
+Done criteria:
+- Damage changes HP correctly.
+- Death and respawn cycle works online.
+
+Day 12: Match UX and resilience
+- Queue/searching UI states.
+- Connecting/loading/failure states.
+- Disconnect and timeout handling.
+- Reduce obvious net jitter with interpolation/snap thresholds.
+Done criteria:
+- End-to-end user flow works from menu to playable match.
+
+Day 13: QA and bug fixing
+- Test matrix: 1 / 2 / 4 / 8 / 16 players.
+- Validate edge cases:
+  empty queue, cancel queue, mid-match disconnect, item race conditions.
+- Fix critical gameplay and networking bugs.
+Done criteria:
+- No blocker bugs for demo scenario.
+
+Day 14: Polish and demo build
+- Minimal polish: sounds, animation blending, UI readability.
+- Build final client + dedicated server artifacts.
+- Run smoke test with checklist.
+Done criteria:
+- Stable demo-ready MVP.
+
+
+6) Strict Scope Limits (important)
+----------------------------------
+Do NOT add in this 2-week prototype:
+- 100-player BR scale
+- complex ballistic model
+- advanced recoil and attachments
+- zone shrinking system
+- vehicles
+- account progression/economy
+- full anti-cheat stack
+
+
+7) MVP Acceptance Criteria
+--------------------------
+Prototype is successful if:
+1. From MainMenu, Start enters queue and finds a match.
+2. Client receives server endpoint and connects automatically.
+3. Player can move, shoot, reload, aim, loot, and heal.
+4. Weapon states work and replicate correctly.
+5. HP/damage/death/respawn work server-authoritatively.
+6. Match with 8-16 players is playable without critical desync.
+
+
+8) Main Risks and Mitigation
+----------------------------
+Risk: Networking complexity consumes timeline.
+Mitigation: Keep all combat/inventory authority on server from day 1.
+
+Risk: Matchmaking backend delays integration.
+Mitigation: Keep service minimal (enqueue/status/match result only).
+
+Risk: First-person/third-person model mismatch.
+Mitigation: Separate rigs and render layers early (days 5-6).
+
+Risk: Content creep (too many weapons/items).
+Mitigation: Hard cap content to 1-2 weapons + ammo + medkit.
+
+
+9) Suggested Team Rhythm (for 2 weeks)
+--------------------------------------
+- Daily 15-minute sync: blockers, priorities, demo checkpoint.
+- End of each day: playable build check.
+- Days 7, 10, 13: milestone reviews (must be playable).
+
+End of file.

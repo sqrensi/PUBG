@@ -1,0 +1,97 @@
+DAY 1 CHECKLIST (UNITY) - ЧТО СДЕЛАТЬ В EDITOR
+==============================================
+
+Что уже сделано в коде:
+- Добавлены скрипты bootstrap/network/ui:
+  - Assets/Scripts/Bootstrap/LaunchMode.cs
+  - Assets/Scripts/Bootstrap/GameBootstrap.cs
+  - Assets/Scripts/Network/NetworkConfig.cs
+  - Assets/Scripts/Network/NetworkLauncher.cs
+  - Assets/Scripts/UI/MainMenuController.cs
+
+
+1) Создай сцены
+---------------
+1. В папке Assets/Scenes создай:
+   - MainMenu.unity
+   - Game.unity
+2. Можешь оставить SampleScene, но MainMenu и Game должны быть в Build Settings.
+
+
+2) Создай NetworkConfig asset
+-----------------------------
+1. Project -> Right Click -> Create -> Shooter Prototype -> Network Config
+2. Назови ассет: NetworkConfig
+3. Рекомендуемые значения:
+   - Server Address: 127.0.0.1
+   - Server Port: 7777
+   - Connect Timeout Seconds: 5
+   - Auto Start Mock Server In Batch Mode: true
+   - Allow Mock Server In Editor: false (для чистой проверки client->server)
+
+
+3) Настрой MainMenu сцену
+-------------------------
+1. Создай пустой объект: AppBootstrap
+2. Добавь на AppBootstrap компоненты:
+   - NetworkLauncher
+   - GameBootstrap
+3. В GameBootstrap:
+   - Network Config -> перетащи созданный NetworkConfig asset
+   - Network Launcher -> перетащи компонент NetworkLauncher с AppBootstrap
+   - Override Launch Mode -> AutoDetect
+
+4. Создай Canvas + кнопку Start + Text статуса:
+   - Canvas
+   - Button (назови StartButton)
+   - Text (назови StatusText)
+
+5. Создай пустой объект: MainMenuUI
+6. Добавь на MainMenuUI компонент MainMenuController
+7. Привяжи ссылки в MainMenuController:
+   - Network Launcher -> NetworkLauncher с AppBootstrap
+   - Start Button -> StartButton
+   - Status Text -> StatusText
+
+
+4) Build Settings
+-----------------
+1. File -> Build Settings
+2. Добавь сцены в этом порядке:
+   - MainMenu
+   - Game
+3. MainMenu должна быть первой сценой.
+
+
+5) Проверка локально (быстрый способ)
+-------------------------------------
+Вариант A (один Editor, без отдельного билда сервера):
+- Во временной проверке поставь у NetworkConfig:
+  Allow Mock Server In Editor = true
+- Нажми Play в MainMenu
+- Нажми Start
+- Ожидаемый результат:
+  статус "Connected to server 127.0.0.1:7777."
+
+После теста верни Allow Mock Server In Editor = false.
+
+
+6) Проверка с отдельным сервером (рекомендуется для Day 1)
+----------------------------------------------------------
+1. Собери отдельный билд "Server" и отдельный "Client" (или один билд с разными параметрами запуска).
+2. Запусти серверный инстанс с параметрами batchmode:
+   - -batchmode -nographics
+3. На сервере должен автоматически подняться mock dedicated listener на 7777.
+4. Запусти клиент, нажми Start.
+5. Ожидаемый результат:
+   - попытка подключения есть в логах;
+   - при доступном сервере подключение успешно.
+
+
+7) Критерий готовности Day 1
+----------------------------
+- Есть MainMenu с кнопкой Start.
+- Есть bootstrap и network launcher.
+- Клиент реально пытается подключиться по IP:PORT.
+- При доступном endpoint подключение проходит успешно.
+

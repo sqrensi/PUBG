@@ -1,0 +1,13 @@
+{
+  "name": "shooterprototype-queue-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local queue and matchmaking service for ShooterPrototype MVP",
+  "main": "server.js",
+  "dependencies": {
+    "ws": "^8.20.1"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
