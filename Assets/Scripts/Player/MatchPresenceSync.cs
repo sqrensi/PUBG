@@ -9,11 +9,19 @@ namespace ShooterPrototype.Player
     public sealed class MatchPresenceSync : MonoBehaviour
     {
         [SerializeField] private int syncTickRate = 120;
-        [SerializeField] private float interpolationBackTimeSeconds = 0.1f;
-        [SerializeField] private int interpolationBackTicks = 2;
-        [SerializeField] private float extrapolationLimitSeconds = 0.035f;
-        [SerializeField] private float remoteRotationLerpSpeed = 34f;
+        [SerializeField] private float interpolationBackTimeSeconds = 0.18f;
+        [SerializeField] private int interpolationBackTicks = 3;
+        [SerializeField] private float extrapolationLimitSeconds = 0.08f;
+        [SerializeField] private float remotePositionLerpSpeed = 26f;
+        [SerializeField] private float remoteVerticalLerpSpeed = 12f;
+        [SerializeField] private float remoteRotationLerpSpeed = 22f;
+        [SerializeField] private float remoteHorizontalSmoothTime = 0.05f;
+        [SerializeField] private float remoteVerticalSmoothTime = 0.08f;
+        [SerializeField] private float teleportSnapDistance = 4f;
+        [SerializeField] private float verticalSnapDistance = 1.2f;
         [SerializeField] private float remoteStaleSeconds = 8f;
+        [SerializeField] private float snapshotSilenceReconnectSeconds = 2.5f;
+        [SerializeField] private bool debugRealtimeLogs = true;
 
         private RealtimeTransportClient realtimeClient;
         private NetworkLauncher networkLauncher;
@@ -21,13 +29,19 @@ namespace ShooterPrototype.Player
         private GameObject remotePlayerPrefab;
         private Coroutine syncCoroutine;
         private double latestServerTimeSeconds;
+        private double latestServerTimeReceiptRealtimeSeconds;
         private double latestServerTickRate = 30.0;
+        private float lastSnapshotReceivedAt;
+        private float lastConnectRequestAt = -10f;
+        private float lastSnapshotDebugAt;
         private readonly Dictionary<string, RemoteAvatar> remoteAvatars = new Dictionary<string, RemoteAvatar>();
 
         private sealed class RemoteAvatar
         {
             public GameObject Root;
             public float LastSeenAt;
+            public Vector2 HorizontalSmoothVelocity;
+            public float VerticalSmoothVelocity;
             public readonly List<PresenceSnapshot> Snapshots = new List<PresenceSnapshot>();
         }
 
@@ -44,6 +58,7 @@ namespace ShooterPrototype.Player
             realtimeClient = transportClient;
             localTicketId = ticketId;
             remotePlayerPrefab = remotePrefab;
+            lastSnapshotReceivedAt = Time.unscaledTime;
         }
 
         private void OnEnable()
@@ -72,7 +87,7 @@ namespace ShooterPrototype.Player
                 return;
             }
 
-            var renderTime = latestServerTimeSeconds - interpolationBackTimeSeconds;
+            var renderTime = GetEstimatedServerTimeSeconds() - interpolationBackTimeSeconds;
             var now = Time.unscaledTime;
             var staleIds = ListPool<string>.Get();
             foreach (var kv in remoteAvatars)
@@ -85,7 +100,39 @@ namespace ShooterPrototype.Player
                 }
 
                 var targetPose = EvaluatePose(avatar.Snapshots, renderTime);
-                avatar.Root.transform.position = targetPose.Position;
+                var currentPosition = avatar.Root.transform.position;
+                var distance = Vector3.Distance(currentPosition, targetPose.Position);
+                if (distance >= teleportSnapDistance)
+                {
+                    avatar.Root.transform.position = targetPose.Position;
+                    avatar.HorizontalSmoothVelocity = Vector2.zero;
+                    avatar.VerticalSmoothVelocity = 0f;
+                }
+                else
+                {
+                    var horizontalCurrent = new Vector2(currentPosition.x, currentPosition.z);
+                    var horizontalTarget = new Vector2(targetPose.Position.x, targetPose.Position.z);
+                    var horizontalNext = Vector2.SmoothDamp(
+                        horizontalCurrent,
+                        horizontalTarget,
+                        ref avatar.HorizontalSmoothVelocity,
+                        Mathf.Max(0.001f, remoteHorizontalSmoothTime),
+                        remotePositionLerpSpeed * 2f,
+                        Time.deltaTime);
+
+                    var yDelta = Mathf.Abs(targetPose.Position.y - currentPosition.y);
+                    var yNext = yDelta >= verticalSnapDistance
+                        ? targetPose.Position.y
+                        : Mathf.SmoothDamp(
+                            currentPosition.y,
+                            targetPose.Position.y,
+                            ref avatar.VerticalSmoothVelocity,
+                            Mathf.Max(0.001f, remoteVerticalSmoothTime),
+                            remoteVerticalLerpSpeed * 2f,
+                            Time.deltaTime);
+
+                    avatar.Root.transform.position = new Vector3(horizontalNext.x, yNext, horizontalNext.y);
+                }
                 var targetRotation = Quaternion.Euler(0f, targetPose.Yaw, 0f);
                 avatar.Root.transform.rotation = Quaternion.Slerp(
                     avatar.Root.transform.rotation,
@@ -117,8 +164,20 @@ namespace ShooterPrototype.Player
                     var currentPos = transform.position;
                     var currentYaw = transform.eulerAngles.y;
 
-                    if (!realtimeClient.IsConnected || !string.Equals(realtimeClient.ConnectedTicketId, localTicketId, StringComparison.Ordinal))
+                    var wrongTicketConnected = realtimeClient.IsConnected &&
+                        !string.Equals(realtimeClient.ConnectedTicketId, localTicketId, StringComparison.Ordinal);
+                    var snapshotSilentTooLong = realtimeClient.IsReady &&
+                        (Time.unscaledTime - lastSnapshotReceivedAt) > Mathf.Max(0.5f, snapshotSilenceReconnectSeconds);
+
+                    if (wrongTicketConnected || snapshotSilentTooLong)
                     {
+                        realtimeClient.Disconnect();
+                    }
+
+                    if ((!realtimeClient.IsConnected || !string.Equals(realtimeClient.ConnectedTicketId, localTicketId, StringComparison.Ordinal)) &&
+                        (Time.unscaledTime - lastConnectRequestAt) > 0.4f)
+                    {
+                        lastConnectRequestAt = Time.unscaledTime;
                         realtimeClient.Connect(localTicketId);
                     }
 
@@ -126,25 +185,56 @@ namespace ShooterPrototype.Player
 
                     if (realtimeClient.TryGetLatestSnapshot(out var snapshot) && snapshot != null)
                     {
-                        if (snapshot.serverTickRate > 0)
-                        {
-                            latestServerTickRate = snapshot.serverTickRate;
-                        }
-
-                        var backByTicksSeconds = Mathf.Max(0, interpolationBackTicks) / (float)latestServerTickRate;
-                        var backSeconds = Mathf.Max(interpolationBackTimeSeconds, backByTicksSeconds);
-                        latestServerTimeSeconds = snapshot.serverTick > 0
-                            ? snapshot.serverTick / latestServerTickRate
-                            : Time.realtimeSinceStartupAsDouble - backSeconds;
-
-                        ApplyRemotePresence(snapshot.players);
-                        var remoteCount = snapshot.players != null ? snapshot.players.Length : 0;
-                        networkLauncher.SetCurrentMatchPlayerCount(remoteCount + 1);
+                        ApplyRealtimeSnapshot(snapshot);
                     }
                 }
 
                 yield return new WaitForSecondsRealtime(1f / Mathf.Clamp(syncTickRate, 10, 120));
             }
+        }
+
+        private void ApplyRealtimeSnapshot(RealtimeTransportClient.RealtimeSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                return;
+            }
+
+            lastSnapshotReceivedAt = Time.unscaledTime;
+
+            if (snapshot.serverTickRate > 0)
+            {
+                latestServerTickRate = snapshot.serverTickRate;
+            }
+
+            var backByTicksSeconds = Mathf.Max(0, interpolationBackTicks) / (float)latestServerTickRate;
+            var backSeconds = Mathf.Max(interpolationBackTimeSeconds, backByTicksSeconds);
+            latestServerTimeSeconds = snapshot.serverTick > 0
+                ? snapshot.serverTick / latestServerTickRate
+                : Time.realtimeSinceStartupAsDouble - backSeconds;
+            latestServerTimeReceiptRealtimeSeconds = Time.realtimeSinceStartupAsDouble;
+
+            ApplyRemotePresence(snapshot.players);
+            var remoteCount = snapshot.players != null ? snapshot.players.Length : 0;
+            networkLauncher?.SetCurrentMatchPlayerCount(remoteCount + 1);
+            if (debugRealtimeLogs && Time.unscaledTime - lastSnapshotDebugAt >= 1f)
+            {
+                lastSnapshotDebugAt = Time.unscaledTime;
+                Debug.Log($"[MatchPresenceSync] snapshot players={remoteCount} avatars={remoteAvatars.Count} tick={snapshot.serverTick}");
+            }
+        }
+
+        private double GetEstimatedServerTimeSeconds()
+        {
+            if (latestServerTimeReceiptRealtimeSeconds <= 0.0)
+            {
+                return latestServerTimeSeconds > 0.0
+                    ? latestServerTimeSeconds
+                    : Time.realtimeSinceStartupAsDouble;
+            }
+
+            var elapsedSinceSnapshot = Time.realtimeSinceStartupAsDouble - latestServerTimeReceiptRealtimeSeconds;
+            return latestServerTimeSeconds + Math.Max(0.0, elapsedSinceSnapshot);
         }
 
         private void ApplyRemotePresence(RealtimeTransportClient.RealtimePlayerState[] players)
@@ -163,7 +253,8 @@ namespace ShooterPrototype.Player
 
                     if (!remoteAvatars.TryGetValue(p.ticketId, out var avatar))
                     {
-                        avatar = CreateAvatar(p.ticketId);
+                        var initialPosition = new Vector3(p.position.x, p.position.y, p.position.z);
+                        avatar = CreateAvatar(p.ticketId, initialPosition, p.yaw);
                         remoteAvatars[p.ticketId] = avatar;
                     }
 
@@ -180,7 +271,7 @@ namespace ShooterPrototype.Player
 
         }
 
-        private RemoteAvatar CreateAvatar(string ticketId)
+        private RemoteAvatar CreateAvatar(string ticketId, Vector3 initialPosition, float initialYaw)
         {
             GameObject root;
             if (remotePlayerPrefab != null)
@@ -194,13 +285,20 @@ namespace ShooterPrototype.Player
             }
 
             root.name = $"Remote_{ticketId.Substring(0, Mathf.Min(6, ticketId.Length))}";
-            root.transform.position = transform.position;
+            root.transform.position = initialPosition;
+            root.transform.rotation = Quaternion.Euler(0f, initialYaw, 0f);
+            if (debugRealtimeLogs)
+            {
+                Debug.Log($"[MatchPresenceSync] create avatar ticket={ticketId}");
+            }
 
             var presentation = root.GetComponent<PlayerViewPresentation>();
             if (presentation != null)
             {
                 presentation.Configure(false);
             }
+
+            EnsureRemoteVisuals(root);
 
             var fpsController = root.GetComponent<FpsCharacterController>();
             if (fpsController != null)
@@ -239,6 +337,67 @@ namespace ShooterPrototype.Player
             };
         }
 
+        private static void EnsureRemoteVisuals(GameObject root)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            var allTransforms = root.GetComponentsInChildren<Transform>(true);
+            for (var i = 0; i < allTransforms.Length; i++)
+            {
+                var tr = allTransforms[i];
+                if (tr == null || tr == root.transform)
+                {
+                    continue;
+                }
+
+                if (string.Equals(tr.name, "FirstPersonHands", StringComparison.Ordinal))
+                {
+                    tr.gameObject.SetActive(false);
+                }
+                else if (string.Equals(tr.name, "ThirdPersonBody", StringComparison.Ordinal))
+                {
+                    tr.gameObject.SetActive(true);
+                }
+            }
+
+            var renderers = root.GetComponentsInChildren<Renderer>(true);
+            var enabledCount = 0;
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var r = renderers[i];
+                if (r == null)
+                {
+                    continue;
+                }
+
+                r.enabled = true;
+                if (r.gameObject.activeInHierarchy)
+                {
+                    enabledCount++;
+                }
+            }
+
+            if (enabledCount > 0)
+            {
+                return;
+            }
+
+            // Safety net: ensure remote player is always visible.
+            var fallback = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+            fallback.name = "RemoteVisualFallback";
+            fallback.transform.SetParent(root.transform, false);
+            fallback.transform.localPosition = new Vector3(0f, 0.9f, 0f);
+            fallback.transform.localScale = new Vector3(0.5f, 0.9f, 0.5f);
+            var collider = fallback.GetComponent<Collider>();
+            if (collider != null)
+            {
+                Destroy(collider);
+            }
+        }
+
         private void RemoveAvatar(string ticketId)
         {
             if (!remoteAvatars.TryGetValue(ticketId, out var avatar))
@@ -274,6 +433,33 @@ namespace ShooterPrototype.Player
                 return;
             }
 
+            if (snapshots.Count > 0)
+            {
+                var lastIndex = snapshots.Count - 1;
+                var last = snapshots[lastIndex];
+                var timeDelta = timeSeconds - last.TimeSeconds;
+
+                // Replace same-time sample instead of adding duplicates (common on uneven network delivery).
+                if (Math.Abs(timeDelta) <= 0.0001)
+                {
+                    snapshots[lastIndex] = new PresenceSnapshot
+                    {
+                        TimeSeconds = timeSeconds,
+                        Position = position,
+                        Yaw = yaw
+                    };
+                    return;
+                }
+
+                // Ignore almost-identical samples that only add jitter noise.
+                if (timeDelta <= 0.05 &&
+                    (position - last.Position).sqrMagnitude <= 0.000004f &&
+                    Mathf.Abs(Mathf.DeltaAngle(last.Yaw, yaw)) <= 0.08f)
+                {
+                    return;
+                }
+            }
+
             snapshots.Add(new PresenceSnapshot
             {
                 TimeSeconds = timeSeconds,
@@ -281,7 +467,7 @@ namespace ShooterPrototype.Player
                 Yaw = yaw
             });
 
-            if (snapshots.Count > 30)
+            if (snapshots.Count > 64)
             {
                 snapshots.RemoveAt(0);
             }
@@ -317,7 +503,14 @@ namespace ShooterPrototype.Player
                 var dt = Math.Max(0.0001, last.TimeSeconds - prev.TimeSeconds);
                 var velocity = (last.Position - prev.Position) / (float)dt;
                 var extra = Mathf.Clamp((float)(renderTime - last.TimeSeconds), 0f, extrapolationLimitSeconds);
-                var pos = last.Position + velocity * extra;
+                var horizontalVelocity = new Vector3(velocity.x, 0f, velocity.z);
+                horizontalVelocity = Vector3.ClampMagnitude(horizontalVelocity, 12f);
+                var horizontalOffset = horizontalVelocity * extra;
+                var verticalOffset = Mathf.Clamp(velocity.y * extra, -0.18f, 0.18f);
+                var pos = new Vector3(
+                    last.Position.x + horizontalOffset.x,
+                    last.Position.y + verticalOffset,
+                    last.Position.z + horizontalOffset.z);
                 return (pos, last.Yaw);
             }
 

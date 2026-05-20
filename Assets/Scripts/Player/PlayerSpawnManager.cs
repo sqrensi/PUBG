@@ -126,10 +126,23 @@ namespace ShooterPrototype.Player
         private void AttachPresenceSync(GameObject localPlayer)
         {
             var launcher = FindObjectOfType<NetworkLauncher>();
-            var realtimeClient = FindObjectOfType<RealtimeTransportClient>();
-            if (launcher == null || realtimeClient == null || string.IsNullOrWhiteSpace(launcher.CurrentTicketId))
+            if (launcher == null || string.IsNullOrWhiteSpace(launcher.CurrentTicketId))
             {
                 return;
+            }
+
+            var realtimeClient = FindObjectOfType<RealtimeTransportClient>();
+            if (realtimeClient == null)
+            {
+                realtimeClient = launcher.GetComponent<RealtimeTransportClient>();
+                if (realtimeClient == null)
+                {
+                    realtimeClient = launcher.gameObject.AddComponent<RealtimeTransportClient>();
+                }
+
+                var wsUrl = launcher.Config != null ? launcher.Config.RealtimeWsUrl : "ws://127.0.0.1:5051";
+                realtimeClient.Configure(wsUrl);
+                Debug.Log($"[PlayerSpawnManager] RealtimeTransportClient auto-created. ws={wsUrl}");
             }
 
             var sync = localPlayer.GetComponent<MatchPresenceSync>();

@@ -66,7 +66,6 @@ namespace ShooterPrototype.UI
             }
 
             networkLauncher.StatusChanged += HandleStatusChanged;
-            networkLauncher.ConnectionFinished += HandleConnectionFinished;
 
             SetStatus(idleStatusText);
             SetStartButtonState(isQueueing: false, interactable: true);
@@ -74,13 +73,21 @@ namespace ShooterPrototype.UI
 
         private void OnDisable()
         {
+            if (queuePollingCoroutine != null)
+            {
+                StopCoroutine(queuePollingCoroutine);
+                queuePollingCoroutine = null;
+            }
+
+            isQueueing = false;
+            currentTicketId = string.Empty;
+
             if (networkLauncher == null)
             {
                 return;
             }
 
             networkLauncher.StatusChanged -= HandleStatusChanged;
-            networkLauncher.ConnectionFinished -= HandleConnectionFinished;
         }
 
         public void OnStartPressed()
@@ -117,38 +124,6 @@ namespace ShooterPrototype.UI
         private void HandleStatusChanged(string message)
         {
             SetStatus(message);
-        }
-
-        private void HandleConnectionFinished(bool connected)
-        {
-            if (!connected)
-            {
-                if (queueApiClient != null && !string.IsNullOrWhiteSpace(networkLauncher.CurrentTicketId))
-                {
-                    StartCoroutine(SendLeaveMatchBestEffort(networkLauncher.CurrentTicketId));
-                }
-
-                if (!string.IsNullOrWhiteSpace(networkLauncher.LastConnectionError))
-                {
-                    SetStatus($"{connectionFailedStatusText} ({networkLauncher.LastConnectionError})");
-                }
-                else
-                {
-                    SetStatus(connectionFailedStatusText);
-                }
-
-                networkLauncher.ClearMatchContext();
-                SetStartButtonState(isQueueing: false, interactable: true);
-                return;
-            }
-
-            SetStatus(connectedStatusText);
-            SetStartButtonState(isQueueing: false, interactable: true);
-
-            if (autoLoadGameSceneOnSuccess)
-            {
-                TryLoadGameScene();
-            }
         }
 
         private void SetStatus(string message)
@@ -199,6 +174,7 @@ namespace ShooterPrototype.UI
         {
             var realtimeClient = FindObjectOfType<RealtimeTransportClient>();
             realtimeClient?.Disconnect();
+            networkLauncher?.DisconnectClient("Preparing queue search.");
 
             if (queueApiClient != null && networkLauncher != null && !string.IsNullOrWhiteSpace(networkLauncher.CurrentTicketId))
             {
@@ -295,7 +271,7 @@ namespace ShooterPrototype.UI
                     var playerCount = Mathf.Max(1, statusResponse.matchedPlayerCount);
                     networkLauncher.SetMatchContext(statusResponse.matchId, playerCount, statusResponse.ticketId);
                     SetStatus($"{connectingStatusText} {statusResponse.serverAddress}:{statusResponse.serverPort} | players: {playerCount}");
-                    _ = networkLauncher.ConnectToServerAsync(statusResponse.serverAddress, statusResponse.serverPort);
+                    yield return StartCoroutine(ConnectAndEnterGameRoutine(statusResponse.serverAddress, statusResponse.serverPort));
                     yield break;
                 }
                 else if (status.Equals("Cancelled", System.StringComparison.OrdinalIgnoreCase))
@@ -358,12 +334,22 @@ namespace ShooterPrototype.UI
         private static string BuildLocalPlayerId()
         {
             var deviceId = SystemInfo.deviceUniqueIdentifier;
-            if (string.IsNullOrWhiteSpace(deviceId))
+            var processId = 0;
+            try
             {
-                return $"player-{System.Guid.NewGuid():N}";
+                processId = System.Diagnostics.Process.GetCurrentProcess().Id;
+            }
+            catch
+            {
+                processId = UnityEngine.Random.Range(1000, 99999);
             }
 
-            return $"player-{Mathf.Abs(deviceId.GetHashCode())}";
+            if (string.IsNullOrWhiteSpace(deviceId))
+            {
+                return $"player-{System.Guid.NewGuid():N}-{processId}";
+            }
+
+            return $"player-{Mathf.Abs(deviceId.GetHashCode())}-{processId}";
         }
 
         private void EnsureDependencies()
@@ -447,6 +433,49 @@ namespace ShooterPrototype.UI
 
             SetStatus($"Загрузка сцены '{gameSceneName}'...");
             SceneManager.LoadScene(gameSceneName);
+        }
+
+        private IEnumerator ConnectAndEnterGameRoutine(string address, int port)
+        {
+            var connectTask = networkLauncher.ConnectToServerAsync(address, port);
+            while (!connectTask.IsCompleted)
+            {
+                yield return null;
+            }
+
+            if (connectTask.IsFaulted)
+            {
+                Debug.LogWarning($"[MainMenuController] Connect task faulted: {connectTask.Exception?.GetBaseException().Message}");
+            }
+
+            var connected = networkLauncher != null && networkLauncher.IsClientConnected;
+            if (!connected)
+            {
+                if (queueApiClient != null && networkLauncher != null && !string.IsNullOrWhiteSpace(networkLauncher.CurrentTicketId))
+                {
+                    yield return StartCoroutine(SendLeaveMatchBestEffort(networkLauncher.CurrentTicketId));
+                }
+
+                if (networkLauncher != null && !string.IsNullOrWhiteSpace(networkLauncher.LastConnectionError))
+                {
+                    SetStatus($"{connectionFailedStatusText} ({networkLauncher.LastConnectionError})");
+                }
+                else
+                {
+                    SetStatus(connectionFailedStatusText);
+                }
+
+                networkLauncher?.ClearMatchContext();
+                SetStartButtonState(isQueueing: false, interactable: true);
+                yield break;
+            }
+
+            SetStatus(connectedStatusText);
+            SetStartButtonState(isQueueing: false, interactable: true);
+            if (autoLoadGameSceneOnSuccess)
+            {
+                TryLoadGameScene();
+            }
         }
     }
 }

@@ -223,6 +223,11 @@ namespace ShooterPrototype.Network
         {
             if (!isClientConnected)
             {
+                isConnecting = false;
+                lastConnectLatencyMs = -1;
+                connectedServerAddress = string.Empty;
+                connectedServerPort = 0;
+                ClearMatchContext();
                 EmitStatus("Disconnect requested, but client is already disconnected.");
                 return;
             }

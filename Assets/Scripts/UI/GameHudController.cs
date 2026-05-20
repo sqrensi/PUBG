@@ -27,6 +27,8 @@ namespace ShooterPrototype.UI
         private Button backButton;
         private Coroutine pingRefreshCoroutine;
         private float fpsSmoothed;
+        private int consecutivePingFailures;
+        private bool returnToMenuRequested;
 
         public void Initialize(NetworkLauncher launcher, string menuSceneName)
         {
@@ -272,10 +274,27 @@ namespace ShooterPrototype.UI
                         pingText.text = ping > 0 ? $"Ping: {ping} ms" : "Ping: -- ms";
                     }
 
+                    if (ping > 0)
+                    {
+                        consecutivePingFailures = 0;
+                    }
+                    else
+                    {
+                        consecutivePingFailures++;
+                        if (!returnToMenuRequested && consecutivePingFailures >= 4)
+                        {
+                            returnToMenuRequested = true;
+                            networkLauncher.DisconnectClient("Lost connection to dedicated server.");
+                            StartCoroutine(LeaveMatchAndReturnRoutine());
+                            yield break;
+                        }
+                    }
+
                     RefreshPlayersText();
                 }
                 else
                 {
+                    consecutivePingFailures = 0;
                     RefreshPingText();
                 }
 
@@ -288,6 +307,7 @@ namespace ShooterPrototype.UI
         private IEnumerator LeaveMatchAndReturnRoutine()
         {
             var realtimeClient = FindObjectOfType<RealtimeTransportClient>();
+            StopPingRefresh();
 
             if (queueApiClient != null && networkLauncher != null && !string.IsNullOrWhiteSpace(networkLauncher.CurrentTicketId))
             {
@@ -312,6 +332,9 @@ namespace ShooterPrototype.UI
             {
                 backButton.interactable = true;
             }
+
+            returnToMenuRequested = false;
+            consecutivePingFailures = 0;
         }
 
         private void RefreshPlayersText()

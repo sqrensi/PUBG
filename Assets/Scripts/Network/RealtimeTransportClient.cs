@@ -29,6 +29,13 @@ namespace ShooterPrototype.Network
         }
 
         [Serializable]
+        private sealed class JoinedMessage
+        {
+            public string type;
+            public string ticketId;
+        }
+
+        [Serializable]
         public sealed class PositionDto
         {
             public float x;
@@ -49,6 +56,7 @@ namespace ShooterPrototype.Network
             public string type;
             public PositionDto position;
             public float yaw;
+            public int poseSeq;
         }
 
         [SerializeField] private string websocketUrl = "ws://127.0.0.1:5051";
@@ -58,11 +66,21 @@ namespace ShooterPrototype.Network
         private SemaphoreSlim sendSemaphore;
         private Task receiveTask;
         private string connectedTicketId = string.Empty;
+        private bool isConnecting;
+        private bool hasJoinAck;
+        private float nextReconnectAllowedAt;
+        private PoseMessage pendingPoseMessage;
+        private int nextPoseSeq;
+        private bool hasPendingPose;
+        private bool poseSendLoopRunning;
+        private float lastSendErrorLogAt;
         private readonly object snapshotLock = new object();
         private RealtimeSnapshot latestSnapshot;
         private bool hasLatestSnapshot;
 
         public bool IsConnected => socket != null && socket.State == WebSocketState.Open;
+        public bool IsConnecting => isConnecting;
+        public bool IsReady => IsConnected && hasJoinAck;
         public string ConnectedTicketId => connectedTicketId;
 
         public void Configure(string wsUrl)
@@ -80,7 +98,17 @@ namespace ShooterPrototype.Network
                 return;
             }
 
-            if (IsConnected && string.Equals(connectedTicketId, ticketId, StringComparison.Ordinal))
+            if (Time.unscaledTime < nextReconnectAllowedAt)
+            {
+                return;
+            }
+
+            if (IsReady && string.Equals(connectedTicketId, ticketId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (isConnecting)
             {
                 return;
             }
@@ -100,7 +128,7 @@ namespace ShooterPrototype.Network
                 return;
             }
 
-            var msg = new PoseMessage
+            pendingPoseMessage = new PoseMessage
             {
                 type = "pose",
                 position = new PositionDto
@@ -109,10 +137,14 @@ namespace ShooterPrototype.Network
                     y = position.y,
                     z = position.z
                 },
-                yaw = yaw
+                yaw = yaw,
+                poseSeq = ++nextPoseSeq
             };
-
-            _ = SendJsonAsync(msg, cts != null ? cts.Token : CancellationToken.None);
+            hasPendingPose = true;
+            if (!poseSendLoopRunning)
+            {
+                _ = FlushLatestPoseLoopAsync();
+            }
         }
 
         public bool TryGetLatestSnapshot(out RealtimeSnapshot snapshot)
@@ -132,6 +164,12 @@ namespace ShooterPrototype.Network
 
         private async Task ConnectInternalAsync(string ticketId)
         {
+            if (isConnecting)
+            {
+                return;
+            }
+
+            isConnecting = true;
             await DisconnectInternalAsync();
 
             try
@@ -139,6 +177,7 @@ namespace ShooterPrototype.Network
                 cts = new CancellationTokenSource();
                 sendSemaphore = new SemaphoreSlim(1, 1);
                 socket = new ClientWebSocket();
+                hasJoinAck = false;
                 await socket.ConnectAsync(new Uri(websocketUrl), cts.Token);
 
                 connectedTicketId = ticketId;
@@ -147,29 +186,35 @@ namespace ShooterPrototype.Network
                     type = "join",
                     ticketId = ticketId
                 }, cts.Token);
+                Debug.Log($"[RealtimeTransportClient] Join sent ticket={ticketId}");
 
-                receiveTask = ReceiveLoopAsync(cts.Token);
+                receiveTask = ReceiveLoopAsync(socket, cts.Token);
                 Debug.Log($"[RealtimeTransportClient] Connected to {websocketUrl} ticket={ticketId}");
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[RealtimeTransportClient] Connect failed: {ex.Message}");
+                nextReconnectAllowedAt = Time.unscaledTime + 0.35f;
                 await DisconnectInternalAsync();
+            }
+            finally
+            {
+                isConnecting = false;
             }
         }
 
-        private async Task ReceiveLoopAsync(CancellationToken token)
+        private async Task ReceiveLoopAsync(ClientWebSocket ownerSocket, CancellationToken token)
         {
             var buffer = new byte[4096];
             var segment = new ArraySegment<byte>(buffer);
             var textBuilder = new StringBuilder(4096);
 
-            while (!token.IsCancellationRequested && socket != null && socket.State == WebSocketState.Open)
+            while (!token.IsCancellationRequested && ownerSocket != null && ownerSocket.State == WebSocketState.Open)
             {
                 WebSocketReceiveResult result;
                 try
                 {
-                    result = await socket.ReceiveAsync(segment, token);
+                    result = await ownerSocket.ReceiveAsync(segment, token);
                 }
                 catch
                 {
@@ -194,7 +239,12 @@ namespace ShooterPrototype.Network
                 TryHandleIncomingJson(json);
             }
 
-            await DisconnectInternalAsync();
+            if (!token.IsCancellationRequested)
+            {
+                nextReconnectAllowedAt = Time.unscaledTime + 0.25f;
+            }
+
+            await DisconnectInternalAsync(ownerSocket);
         }
 
         private void TryHandleIncomingJson(string json)
@@ -216,6 +266,14 @@ namespace ShooterPrototype.Network
 
             if (snapshot == null || !string.Equals(snapshot.type, "snapshot", StringComparison.Ordinal))
             {
+                var joined = JsonUtility.FromJson<JoinedMessage>(json);
+                if (joined != null &&
+                    string.Equals(joined.type, "joined", StringComparison.Ordinal) &&
+                    !string.IsNullOrWhiteSpace(joined.ticketId) &&
+                    string.Equals(joined.ticketId, connectedTicketId, StringComparison.Ordinal))
+                {
+                    hasJoinAck = true;
+                }
                 return;
             }
 
@@ -247,7 +305,11 @@ namespace ShooterPrototype.Network
             }
             catch
             {
-                // ignored; receive loop/disconnect handles recovery
+                if (Time.unscaledTime - lastSendErrorLogAt > 1f)
+                {
+                    lastSendErrorLogAt = Time.unscaledTime;
+                    Debug.LogWarning($"[RealtimeTransportClient] Send failed payload={payload?.GetType().Name ?? "null"}");
+                }
             }
             finally
             {
@@ -255,8 +317,40 @@ namespace ShooterPrototype.Network
             }
         }
 
-        private async Task DisconnectInternalAsync()
+        private async Task FlushLatestPoseLoopAsync()
         {
+            if (poseSendLoopRunning)
+            {
+                return;
+            }
+
+            poseSendLoopRunning = true;
+            try
+            {
+                while (hasPendingPose && socket != null && socket.State == WebSocketState.Open)
+                {
+                    var msg = pendingPoseMessage;
+                    hasPendingPose = false;
+                    await SendJsonAsync(msg, cts != null ? cts.Token : CancellationToken.None);
+                }
+            }
+            catch
+            {
+                // ignored; regular reconnect flow handles broken socket.
+            }
+            finally
+            {
+                poseSendLoopRunning = false;
+            }
+        }
+
+        private async Task DisconnectInternalAsync(ClientWebSocket ownerSocket = null)
+        {
+            if (ownerSocket != null && socket != ownerSocket)
+            {
+                return;
+            }
+
             var localCts = cts;
             cts = null;
 
@@ -296,6 +390,11 @@ namespace ShooterPrototype.Network
             }
 
             connectedTicketId = string.Empty;
+            isConnecting = false;
+            hasJoinAck = false;
+            nextPoseSeq = 0;
+            hasPendingPose = false;
+            poseSendLoopRunning = false;
             lock (snapshotLock)
             {
                 latestSnapshot = null;
