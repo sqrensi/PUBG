@@ -27,6 +27,13 @@ namespace ShooterPrototype.Player
         private CharacterController characterController;
         private float verticalVelocity;
         private float cameraPitch;
+        private float horizontalSpeed;
+        private float moveInputMagnitude;
+
+        public bool IsGrounded => characterController != null && characterController.isGrounded;
+        public float VerticalVelocity => verticalVelocity;
+        public float HorizontalSpeed => horizontalSpeed;
+        public float MoveInputMagnitude => moveInputMagnitude;
 
         public void Configure(Transform pivot, Camera localCamera, bool shouldLockCursor = true)
         {
@@ -96,6 +103,7 @@ namespace ShooterPrototype.Player
             var moveInput = ReadMoveInput();
             var inputX = moveInput.x;
             var inputZ = moveInput.y;
+            moveInputMagnitude = Mathf.Clamp01(moveInput.magnitude);
 
             var moveDirection = (transform.right * inputX + transform.forward * inputZ);
             if (moveDirection.sqrMagnitude > 1f)
@@ -118,6 +126,9 @@ namespace ShooterPrototype.Player
             var velocity = moveDirection * moveSpeed;
             velocity.y = verticalVelocity;
             characterController.Move(velocity * Time.deltaTime);
+
+            var ccVelocity = characterController.velocity;
+            horizontalSpeed = new Vector2(ccVelocity.x, ccVelocity.z).magnitude;
         }
 
         private static Vector2 ReadMoveInput()

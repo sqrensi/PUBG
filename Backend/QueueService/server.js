@@ -544,6 +544,12 @@ function matchTicketToSession(ticket, session, nowMs) {
     ticket.presence = {
       position: { x: 0, y: 0, z: 0 },
       yaw: 0,
+      lookPitch: 0,
+      hasPose: false,
+      animSpeed: 0,
+      isGrounded: true,
+      jumpState: 0,
+      animPhase: 0,
       sampleTick: 0,
       sampleTimeMs: 0,
       serverSampleTimeMs: 0,
@@ -574,6 +580,12 @@ function handleWsJoin(socket, ticketId) {
     ticket.presence = {
       position: { x: 0, y: 0, z: 0 },
       yaw: 0,
+      lookPitch: 0,
+      hasPose: false,
+      animSpeed: 0,
+      isGrounded: true,
+      jumpState: 0,
+      animPhase: 0,
       sampleTick: currentServerTick,
       sampleTimeMs: nowMs,
       serverSampleTimeMs: nowMs,
@@ -621,11 +633,23 @@ function handleWsPose(socket, message) {
 
   const position = normalizePosition(message.position);
   const yaw = normalizeNumber(message.yaw, 0);
+  const lookPitch = normalizeNumber(message.lookPitch, 0);
+  const animSpeed = Math.max(0, Math.min(1, normalizeNumber(message.animSpeed, 0)));
+  const isGrounded = !!message.isGrounded;
+  const jumpState = Math.max(0, Math.min(2, normalizeInt64(message.jumpState, isGrounded ? 0 : 2)));
+  const rawAnimPhase = normalizeNumber(message.animPhase, 0);
+  const animPhase = ((rawAnimPhase % 1) + 1) % 1;
   const poseSeq = normalizeInt64(message.poseSeq, -1);
   const serverSampleTimeMs = Date.now();
   ticket.presence = {
     position,
     yaw,
+    lookPitch,
+    hasPose: true,
+    animSpeed,
+    isGrounded,
+    jumpState,
+    animPhase,
     sampleTick: currentServerTick,
     sampleTimeMs: serverSampleTimeMs,
     serverSampleTimeMs,
@@ -743,6 +767,12 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       continue;
     }
 
+    // Skip players that have not sent a real pose yet.
+    // Prevents remote spawn at default zero before first update arrives.
+    if (!ticket.presence.hasPose) {
+      continue;
+    }
+
     const stillInConnectGrace = ticket.matchedAtMs > 0 &&
       (nowMs - ticket.matchedAtMs) <= MATCH_CONNECT_GRACE_SECONDS * 1000;
     const hasRecentPresence = ticket.presence.lastSeenMs > 0 &&
@@ -756,6 +786,11 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       ticketId: ticket.ticketId,
       position: ticket.presence.position,
       yaw: ticket.presence.yaw,
+      lookPitch: ticket.presence.lookPitch || 0,
+      animSpeed: ticket.presence.animSpeed || 0,
+      isGrounded: ticket.presence.isGrounded !== false,
+      jumpState: Number.isFinite(ticket.presence.jumpState) ? ticket.presence.jumpState : 0,
+      animPhase: Number.isFinite(ticket.presence.animPhase) ? ticket.presence.animPhase : 0,
       sampleTick: ticket.presence.sampleTick || currentServerTick,
       sampleTimeMs: ticket.presence.sampleTimeMs || ticket.presence.serverSampleTimeMs || Date.now()
     });
