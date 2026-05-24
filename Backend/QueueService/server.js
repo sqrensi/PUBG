@@ -545,8 +545,15 @@ function matchTicketToSession(ticket, session, nowMs) {
       position: { x: 0, y: 0, z: 0 },
       yaw: 0,
       lookPitch: 0,
+      shotSeq: 0,
+      reloadSeq: 0,
+      hitPlayerSeq: 0,
+      footstepSeq: 0,
+      isCrouching: false,
+      wallAvoidBlend: 0,
       hasPose: false,
       animSpeed: 0,
+      isAiming: false,
       isGrounded: true,
       jumpState: 0,
       animPhase: 0,
@@ -581,8 +588,15 @@ function handleWsJoin(socket, ticketId) {
       position: { x: 0, y: 0, z: 0 },
       yaw: 0,
       lookPitch: 0,
+      shotSeq: 0,
+      reloadSeq: 0,
+      hitPlayerSeq: 0,
+      footstepSeq: 0,
+      isCrouching: false,
+      wallAvoidBlend: 0,
       hasPose: false,
       animSpeed: 0,
+      isAiming: false,
       isGrounded: true,
       jumpState: 0,
       animPhase: 0,
@@ -634,7 +648,14 @@ function handleWsPose(socket, message) {
   const position = normalizePosition(message.position);
   const yaw = normalizeNumber(message.yaw, 0);
   const lookPitch = normalizeNumber(message.lookPitch, 0);
+  const shotSeq = Math.max(0, normalizeInt64(message.shotSeq, 0));
+  const reloadSeq = Math.max(0, normalizeInt64(message.reloadSeq, 0));
+  const hitPlayerSeq = Math.max(0, normalizeInt64(message.hitPlayerSeq, 0));
+  const footstepSeq = Math.max(0, normalizeInt64(message.footstepSeq, 0));
+  const isCrouching = !!message.isCrouching;
+  const wallAvoidBlend = Math.max(0, Math.min(1, normalizeNumber(message.wallAvoidBlend, 0)));
   const animSpeed = Math.max(0, Math.min(1, normalizeNumber(message.animSpeed, 0)));
+  const isAiming = !!message.isAiming;
   const isGrounded = !!message.isGrounded;
   const jumpState = Math.max(0, Math.min(2, normalizeInt64(message.jumpState, isGrounded ? 0 : 2)));
   const rawAnimPhase = normalizeNumber(message.animPhase, 0);
@@ -645,8 +666,15 @@ function handleWsPose(socket, message) {
     position,
     yaw,
     lookPitch,
+    shotSeq,
+    reloadSeq,
+    hitPlayerSeq,
+    footstepSeq,
+    isCrouching,
+    wallAvoidBlend,
     hasPose: true,
     animSpeed,
+    isAiming,
     isGrounded,
     jumpState,
     animPhase,
@@ -787,7 +815,14 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       position: ticket.presence.position,
       yaw: ticket.presence.yaw,
       lookPitch: ticket.presence.lookPitch || 0,
+      shotSeq: Number.isFinite(ticket.presence.shotSeq) ? ticket.presence.shotSeq : 0,
+      reloadSeq: Number.isFinite(ticket.presence.reloadSeq) ? ticket.presence.reloadSeq : 0,
+      hitPlayerSeq: Number.isFinite(ticket.presence.hitPlayerSeq) ? ticket.presence.hitPlayerSeq : 0,
+      footstepSeq: Number.isFinite(ticket.presence.footstepSeq) ? ticket.presence.footstepSeq : 0,
+      isCrouching: !!ticket.presence.isCrouching,
+      wallAvoidBlend: Number.isFinite(ticket.presence.wallAvoidBlend) ? ticket.presence.wallAvoidBlend : 0,
       animSpeed: ticket.presence.animSpeed || 0,
+      isAiming: !!ticket.presence.isAiming,
       isGrounded: ticket.presence.isGrounded !== false,
       jumpState: Number.isFinite(ticket.presence.jumpState) ? ticket.presence.jumpState : 0,
       animPhase: Number.isFinite(ticket.presence.animPhase) ? ticket.presence.animPhase : 0,

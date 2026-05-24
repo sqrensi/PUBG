@@ -15,6 +15,18 @@ namespace ShooterPrototype.Network
             public string ticketId;
             public PositionDto position;
             public float yaw;
+            public float lookPitch;
+            public int shotSeq;
+            public int reloadSeq;
+            public int hitPlayerSeq;
+            public int footstepSeq;
+            public bool isCrouching;
+            public float wallAvoidBlend;
+            public float animSpeed;
+            public bool isAiming;
+            public bool isGrounded;
+            public int jumpState;
+            public float animPhase;
             public int sampleTick;
             public long sampleTimeMs;
         }
@@ -56,6 +68,18 @@ namespace ShooterPrototype.Network
             public string type;
             public PositionDto position;
             public float yaw;
+            public float lookPitch;
+            public int shotSeq;
+            public int reloadSeq;
+            public int hitPlayerSeq;
+            public int footstepSeq;
+            public bool isCrouching;
+            public float wallAvoidBlend;
+            public float animSpeed;
+            public bool isAiming;
+            public bool isGrounded;
+            public int jumpState;
+            public float animPhase;
             public int poseSeq;
         }
 
@@ -121,7 +145,21 @@ namespace ShooterPrototype.Network
             _ = DisconnectInternalAsync();
         }
 
-        public void SendPose(Vector3 position, float yaw)
+        public void SendPose(
+            Vector3 position,
+            float yaw,
+            float lookPitch = 0f,
+            int shotSeq = 0,
+            int reloadSeq = 0,
+            int hitPlayerSeq = 0,
+            int footstepSeq = 0,
+            bool isCrouching = false,
+            float wallAvoidBlend = 0f,
+            bool isAiming = false,
+            float animSpeed = 0f,
+            bool isGrounded = true,
+            int jumpState = 0,
+            float animPhase = 0f)
         {
             if (!IsConnected)
             {
@@ -138,6 +176,18 @@ namespace ShooterPrototype.Network
                     z = position.z
                 },
                 yaw = yaw,
+                lookPitch = lookPitch,
+                shotSeq = Math.Max(0, shotSeq),
+                reloadSeq = Math.Max(0, reloadSeq),
+                hitPlayerSeq = Math.Max(0, hitPlayerSeq),
+                footstepSeq = Math.Max(0, footstepSeq),
+                isCrouching = isCrouching,
+                wallAvoidBlend = Mathf.Clamp01(wallAvoidBlend),
+                animSpeed = Mathf.Clamp01(animSpeed),
+                isAiming = isAiming,
+                isGrounded = isGrounded,
+                jumpState = Mathf.Clamp(jumpState, 0, 2),
+                animPhase = Mathf.Repeat(animPhase, 1f),
                 poseSeq = ++nextPoseSeq
             };
             hasPendingPose = true;

@@ -90,12 +90,13 @@ namespace ShooterPrototype.Player
 
             line.positionCount = Mathf.Max(3, armSmoothSegments + 1);
             line.useWorldSpace = true;
-            line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            line.receiveShadows = false;
+            line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            line.receiveShadows = true;
             line.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
             line.textureMode = LineTextureMode.Stretch;
             line.numCornerVertices = 0;
             line.numCapVertices = 0;
+            line.generateLightingData = true;
             line.widthMultiplier = Mathf.Max(0.001f, threadWidth);
             line.startWidth = Mathf.Max(0.001f, threadWidth);
             line.endWidth = Mathf.Max(0.001f, threadWidth);
@@ -105,18 +106,14 @@ namespace ShooterPrototype.Player
 
             if (sharedThreadMaterial == null)
             {
-                var shader = Shader.Find("Sprites/Default");
-                if (shader == null)
-                {
-                    shader = Shader.Find("Unlit/Color");
-                }
-                if (shader == null)
-                {
-                    shader = Shader.Find("Universal Render Pipeline/Unlit");
-                }
+                var shader = Shader.Find("Universal Render Pipeline/Lit");
                 if (shader == null)
                 {
                     shader = Shader.Find("Standard");
+                }
+                if (shader == null)
+                {
+                    shader = Shader.Find("Sprites/Default");
                 }
 
                 if (shader != null)
@@ -129,6 +126,14 @@ namespace ShooterPrototype.Player
                     if (sharedThreadMaterial.HasProperty("_Color"))
                     {
                         sharedThreadMaterial.SetColor("_Color", threadColor);
+                    }
+                    if (sharedThreadMaterial.HasProperty("_Smoothness"))
+                    {
+                        sharedThreadMaterial.SetFloat("_Smoothness", 0f);
+                    }
+                    if (sharedThreadMaterial.HasProperty("_Metallic"))
+                    {
+                        sharedThreadMaterial.SetFloat("_Metallic", 0f);
                     }
                 }
             }

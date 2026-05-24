@@ -14,6 +14,7 @@ namespace ShooterPrototype.UI
     public sealed class GameHudController : MonoBehaviour
     {
         private const string CanvasObjectName = "RuntimeGameHudCanvas";
+        private const string MutePrefKey = "client_audio_muted";
 
         private NetworkLauncher networkLauncher;
         private QueueApiClient queueApiClient;
@@ -24,11 +25,15 @@ namespace ShooterPrototype.UI
         private Text playersText;
         private Text pingText;
         private Text fpsText;
+        private Text ammoText;
         private Button backButton;
+        private Button muteButton;
+        private Text muteButtonLabel;
         private Coroutine pingRefreshCoroutine;
         private float fpsSmoothed;
         private int consecutivePingFailures;
         private bool returnToMenuRequested;
+        private bool isMuted;
 
         public void Initialize(NetworkLauncher launcher, string menuSceneName)
         {
@@ -43,6 +48,7 @@ namespace ShooterPrototype.UI
             }
 
             EnsureHudExists();
+            LoadMuteState();
             RefreshConnectionText();
             SetActiveForScene(false);
         }
@@ -107,6 +113,26 @@ namespace ShooterPrototype.UI
             StartCoroutine(LeaveMatchAndReturnRoutine());
         }
 
+        private void HandleMutePressed()
+        {
+            isMuted = !isMuted;
+            PlayerPrefs.SetInt(MutePrefKey, isMuted ? 1 : 0);
+            PlayerPrefs.Save();
+            ApplyMuteState();
+        }
+
+        private void LoadMuteState()
+        {
+            isMuted = PlayerPrefs.GetInt(MutePrefKey, 0) == 1;
+            ApplyMuteState();
+        }
+
+        private void ApplyMuteState()
+        {
+            AudioListener.volume = isMuted ? 0f : 1f;
+            RefreshMuteButtonText();
+        }
+
         private void EnsureHudExists()
         {
             if (canvas != null)
@@ -139,7 +165,14 @@ namespace ShooterPrototype.UI
 
         private void BuildHudLayout(GameObject rootCanvasObject)
         {
-            if (connectionText != null && playersText != null && pingText != null && fpsText != null && backButton != null)
+            if (connectionText != null &&
+                playersText != null &&
+                pingText != null &&
+                fpsText != null &&
+                ammoText != null &&
+                backButton != null &&
+                muteButton != null &&
+                muteButtonLabel != null)
             {
                 return;
             }
@@ -161,6 +194,8 @@ namespace ShooterPrototype.UI
             playersText = CreateLabel(panelObject.transform, "PlayersText", new Vector2(10f, -34f), "Players in match: --");
             pingText = CreateLabel(panelObject.transform, "PingText", new Vector2(10f, -58f), "Ping: -- ms");
             fpsText = CreateLabel(panelObject.transform, "FpsText", new Vector2(10f, -82f), "FPS: --");
+            ammoText = CreateLabel(panelObject.transform, "AmmoText", new Vector2(10f, -106f), "Ammo: --/--");
+            panelRect.sizeDelta = new Vector2(0f, 132f);
 
             var buttonObject = new GameObject("BackButton");
             buttonObject.transform.SetParent(panelObject.transform, false);
@@ -185,6 +220,30 @@ namespace ShooterPrototype.UI
             buttonLabelRect.offsetMin = Vector2.zero;
             buttonLabelRect.offsetMax = Vector2.zero;
             buttonLabel.alignment = TextAnchor.MiddleCenter;
+
+            var muteObject = new GameObject("MuteButton");
+            muteObject.transform.SetParent(panelObject.transform, false);
+
+            var muteRect = muteObject.AddComponent<RectTransform>();
+            muteRect.anchorMin = new Vector2(1f, 0.5f);
+            muteRect.anchorMax = new Vector2(1f, 0.5f);
+            muteRect.pivot = new Vector2(1f, 0.5f);
+            muteRect.sizeDelta = new Vector2(170f, 36f);
+            muteRect.anchoredPosition = new Vector2(-190f, 0f);
+
+            var muteImage = muteObject.AddComponent<Image>();
+            muteImage.color = new Color(0.15f, 0.15f, 0.15f, 0.95f);
+
+            muteButton = muteObject.AddComponent<Button>();
+            muteButton.onClick.AddListener(HandleMutePressed);
+            muteButtonLabel = CreateLabel(muteObject.transform, "Label", Vector2.zero, "");
+            var muteLabelRect = muteButtonLabel.rectTransform;
+            muteLabelRect.anchorMin = Vector2.zero;
+            muteLabelRect.anchorMax = Vector2.one;
+            muteLabelRect.offsetMin = Vector2.zero;
+            muteLabelRect.offsetMax = Vector2.zero;
+            muteButtonLabel.alignment = TextAnchor.MiddleCenter;
+            RefreshMuteButtonText();
         }
 
         private Text CreateLabel(Transform parent, string objectName, Vector2 anchoredPosition, string textValue)
@@ -369,6 +428,36 @@ namespace ShooterPrototype.UI
                 : Mathf.Lerp(fpsSmoothed, currentFps, 0.15f);
 
             fpsText.text = $"FPS: {Mathf.RoundToInt(fpsSmoothed)}";
+            RefreshAmmoText();
+        }
+
+        private void RefreshAmmoText()
+        {
+            if (ammoText == null)
+            {
+                return;
+            }
+
+            var local = FindObjectOfType<ShooterPrototype.Player.LocalPlayerMarker>();
+            var weapon = local != null ? local.GetComponent<ShooterPrototype.Player.PlayerWeaponController>() : null;
+            if (weapon == null)
+            {
+                ammoText.text = "Ammo: --/--";
+                return;
+            }
+
+            var suffix = weapon.IsReloading ? " (reloading)" : string.Empty;
+            ammoText.text = $"Ammo: {weapon.CurrentAmmo}/{weapon.MagazineSize}{suffix}";
+        }
+
+        private void RefreshMuteButtonText()
+        {
+            if (muteButtonLabel == null)
+            {
+                return;
+            }
+
+            muteButtonLabel.text = isMuted ? "Sound: OFF" : "Sound: ON";
         }
 
         private static void EnsureEventSystemExists()

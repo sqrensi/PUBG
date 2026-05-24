@@ -42,10 +42,19 @@ namespace ShooterPrototype.Player
         [Header("Leg curve")]
         [SerializeField] private float legBendForward = 0.05f;
         [SerializeField] private float legBendOutward = 0.03f;
+        [Header("Crouch")]
+        [SerializeField] private float crouchTransitionSmoothTime = 0.16f;
+        [SerializeField] private float crouchRootDrop = 0.16f;
+        [SerializeField] private float crouchShoulderDrop = 0.28f;
+        [SerializeField] private float crouchHipDrop = 0.1f;
+        [SerializeField] private float crouchLegShorten = 0.2f;
+        [SerializeField] private float crouchTorsoFollowDrop = 0.08f;
+        [SerializeField] private float crouchLineDropY = 0.2f;
         [SerializeField] private bool useNetworkState;
         [SerializeField] private bool debugArmJitterLogs;
         [SerializeField] private float debugLogInterval = 0.5f;
 
+        private Vector3 baseRootLocalPos;
         private Vector3 baseShoulderLocalPos;
         private Vector3 baseHipLocalPos;
         private Vector3 baseLeftHandLocalPos;
@@ -69,6 +78,9 @@ namespace ShooterPrototype.Player
         private float pendingNetworkGroundedSince = -1f;
         private int networkJumpState;
         private float networkAnimPhase01;
+        private bool networkCrouching;
+        private float crouchBlend;
+        private float crouchBlendVelocity;
         private float currentSpeed01;
         private float speedSmoothVelocity;
         private bool currentGrounded = true;
@@ -78,6 +90,10 @@ namespace ShooterPrototype.Player
         private Vector3 previousLeftHandTargetPos;
         private Vector3 previousRightHandTargetPos;
         private PlayerWeaponMount weaponMount;
+        private LineRenderer torsoLine;
+        private LineRenderer neckLine;
+        private Vector3 torsoLineBaseLocalPos;
+        private Vector3 neckLineBaseLocalPos;
 
         public float CurrentAnimPhase01 => Mathf.Repeat(walkPhase / (Mathf.PI * 2f), 1f);
         public float CurrentSpeed01 => currentSpeed01;
@@ -98,9 +114,11 @@ namespace ShooterPrototype.Player
             threadArmRig = GetComponentInChildren<ThreadArmRig>(true);
 
             CacheBasePose();
+            CacheBodyLines();
             lastRootWorldPos = rootTransform.position;
             ForceLegLineSetup(leftLegLine);
             ForceLegLineSetup(rightLegLine);
+            ConfigureBodyLineShadows();
             previousLeftHandTargetPos = leftHandTarget != null ? leftHandTarget.position : Vector3.zero;
             previousRightHandTargetPos = rightHandTarget != null ? rightHandTarget.position : Vector3.zero;
         }
@@ -129,6 +147,7 @@ namespace ShooterPrototype.Player
             fpsController = controller;
 
             CacheBasePose();
+            CacheBodyLines();
             ForceLegLineSetup(leftLegLine);
             ForceLegLineSetup(rightLegLine);
         }
@@ -156,7 +175,7 @@ namespace ShooterPrototype.Player
             useNetworkState = enabled;
         }
 
-        public void SetNetworkAnimationState(float speed01, bool grounded, int jumpState, float animPhase01)
+        public void SetNetworkAnimationState(float speed01, bool grounded, int jumpState, float animPhase01, bool isCrouching = false)
         {
             useNetworkState = true;
             networkSpeed01 = Mathf.Clamp01(speed01);
@@ -179,6 +198,7 @@ namespace ShooterPrototype.Player
             }
             networkJumpState = Mathf.Clamp(jumpState, 0, 2);
             networkAnimPhase01 = Mathf.Repeat(animPhase01, 1f);
+            networkCrouching = isCrouching;
         }
 
         private void LateUpdate()
@@ -248,8 +268,20 @@ namespace ShooterPrototype.Player
 
             landImpulse = Mathf.MoveTowards(landImpulse, 0f, landBobRecover * dt);
 
-            shoulderAnchor.localPosition = baseShoulderLocalPos + new Vector3(0f, bob - landImpulse, 0f);
-            hipAnchor.localPosition = baseHipLocalPos + new Vector3(0f, bob * 0.55f - landImpulse * 0.6f, 0f);
+            var isCrouching = useNetworkState
+                ? networkCrouching
+                : (fpsController != null && fpsController.IsCrouching);
+            crouchBlend = Mathf.SmoothDamp(
+                crouchBlend,
+                isCrouching ? 1f : 0f,
+                ref crouchBlendVelocity,
+                Mathf.Max(0.01f, crouchTransitionSmoothTime));
+
+            var torsoFollowDrop = crouchTorsoFollowDrop * crouchBlend;
+            rootTransform.localPosition = baseRootLocalPos + Vector3.down * (crouchRootDrop * crouchBlend);
+            shoulderAnchor.localPosition = baseShoulderLocalPos + new Vector3(0f, bob - landImpulse - crouchShoulderDrop * crouchBlend - torsoFollowDrop, 0f);
+            hipAnchor.localPosition = baseHipLocalPos + new Vector3(0f, bob * 0.55f - landImpulse * 0.6f - crouchHipDrop * crouchBlend - torsoFollowDrop * 0.8f, 0f);
+            ApplyCrouchLineDrop(crouchBlend);
 
             var leftStep = EvaluateWalkOffset(walkPhase, motionSpeed01, -1f);
             var rightStep = EvaluateWalkOffset(walkPhase + Mathf.PI, motionSpeed01, 1f);
@@ -285,16 +317,19 @@ namespace ShooterPrototype.Player
                 MoveTargetLocal(rightHandTarget, rightHandLocal, ref rightHandVelocity, smoothTime);
             }
 
+            var crouchStepScale = Mathf.Lerp(1f, 0.45f, crouchBlend);
             var leftFootLocal = baseLeftFootLocalPos +
                                 new Vector3(
                                     leftStep.x * footStepLength,
-                                    leftStep.y * footStepHeight + airborneBlend * jumpFootTuck,
+                                    leftStep.y * footStepHeight * crouchStepScale + airborneBlend * jumpFootTuck,
                                     Mathf.Abs(leftStep.x) * 0.05f);
             var rightFootLocal = baseRightFootLocalPos +
                                  new Vector3(
                                      rightStep.x * footStepLength,
-                                     rightStep.y * footStepHeight + airborneBlend * jumpFootTuck,
+                                     rightStep.y * footStepHeight * crouchStepScale + airborneBlend * jumpFootTuck,
                                      Mathf.Abs(rightStep.x) * 0.05f);
+            leftFootLocal.y += crouchLegShorten * crouchBlend;
+            rightFootLocal.y += crouchLegShorten * crouchBlend;
 
             MoveTargetLocal(leftFootTarget, leftFootLocal, ref leftFootVelocity, smoothTime);
             MoveTargetLocal(rightFootTarget, rightFootLocal, ref rightFootVelocity, smoothTime);
@@ -316,12 +351,55 @@ namespace ShooterPrototype.Player
 
         private void CacheBasePose()
         {
+            baseRootLocalPos = rootTransform != null ? rootTransform.localPosition : Vector3.zero;
             baseShoulderLocalPos = shoulderAnchor != null ? shoulderAnchor.localPosition : Vector3.zero;
             baseHipLocalPos = hipAnchor != null ? hipAnchor.localPosition : Vector3.zero;
             baseLeftHandLocalPos = leftHandTarget != null ? leftHandTarget.localPosition : Vector3.zero;
             baseRightHandLocalPos = rightHandTarget != null ? rightHandTarget.localPosition : Vector3.zero;
             baseLeftFootLocalPos = leftFootTarget != null ? leftFootTarget.localPosition : Vector3.zero;
             baseRightFootLocalPos = rightFootTarget != null ? rightFootTarget.localPosition : Vector3.zero;
+        }
+
+        private void CacheBodyLines()
+        {
+            torsoLine = FindLineByName("TorsoLine");
+            neckLine = FindLineByName("NeckLine");
+            torsoLineBaseLocalPos = torsoLine != null ? torsoLine.transform.localPosition : Vector3.zero;
+            neckLineBaseLocalPos = neckLine != null ? neckLine.transform.localPosition : Vector3.zero;
+        }
+
+        private void ApplyCrouchLineDrop(float blend)
+        {
+            var lineDrop = Mathf.Max(0f, crouchLineDropY) * Mathf.Clamp01(blend);
+            if (torsoLine != null)
+            {
+                torsoLine.transform.localPosition = torsoLineBaseLocalPos + Vector3.down * lineDrop;
+            }
+
+            if (neckLine != null)
+            {
+                neckLine.transform.localPosition = neckLineBaseLocalPos + Vector3.down * lineDrop;
+            }
+        }
+
+        private LineRenderer FindLineByName(string lineName)
+        {
+            if (string.IsNullOrWhiteSpace(lineName))
+            {
+                return null;
+            }
+
+            var lines = GetComponentsInChildren<LineRenderer>(true);
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                if (line != null && string.Equals(line.name, lineName, System.StringComparison.Ordinal))
+                {
+                    return line;
+                }
+            }
+
+            return null;
         }
 
         private Vector2 EvaluateWalkOffset(float phase, float speed01, float side)
@@ -379,6 +457,26 @@ namespace ShooterPrototype.Player
 
             line.positionCount = 3;
             line.useWorldSpace = true;
+            line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+            line.receiveShadows = true;
+            line.generateLightingData = true;
+        }
+
+        private void ConfigureBodyLineShadows()
+        {
+            var lines = GetComponentsInChildren<LineRenderer>(true);
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                if (line == null)
+                {
+                    continue;
+                }
+
+                line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
+                line.receiveShadows = true;
+                line.generateLightingData = true;
+            }
         }
 
         private void UpdateLegCurve(LineRenderer line, Vector3 start, Vector3 end, float sideSign)

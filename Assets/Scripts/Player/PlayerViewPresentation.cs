@@ -75,6 +75,14 @@ namespace ShooterPrototype.Player
                     continue;
                 }
 
+                // Keep shadow-only proxies enabled for local first-person view.
+                // They are invisible but needed to cast the character shadow.
+                if (renderer.shadowCastingMode == UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly)
+                {
+                    renderer.enabled = true;
+                    continue;
+                }
+
                 var objectName = renderer.gameObject.name;
                 renderer.enabled = IsFirstPersonVisibleRenderer(renderer.transform, objectName);
             }

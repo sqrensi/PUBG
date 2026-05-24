@@ -16,24 +16,70 @@ namespace ShooterPrototype.Player
         [SerializeField] private float moveSpeed = 5.5f;
         [SerializeField] private float jumpHeight = 1.25f;
         [SerializeField] private float gravity = -24f;
+        [SerializeField] private float crouchSpeedMultiplier = 0.55f;
+        [SerializeField] private float crouchControllerHeight = 1f;
+        [SerializeField] private float crouchDownSmoothTime = 0.18f;
+        [SerializeField] private float crouchUpSmoothTime = 0.22f;
+        [SerializeField] private float crouchCameraOffset = 0.38f;
 
         [Header("Look")]
         [SerializeField] private float mouseSensitivity = 2.2f;
         [SerializeField] private float maxLookAngle = 80f;
+        [SerializeField] private float hipMaxLookAngle = 50f;
+        [SerializeField] private float adsMaxLookAngle = 40f;
 
         [Header("State")]
         [SerializeField] private bool lockCursorOnEnable = true;
+
+        [Header("Ground Check")]
+        [SerializeField] private float groundedSphereRadius = 0.2f;
+        [SerializeField] private float groundedSphereOffset = 0.03f;
+        [SerializeField] private float groundedCheckDistance = 0.08f;
+        [SerializeField] private LayerMask groundedMask = ~0;
 
         private CharacterController characterController;
         private float verticalVelocity;
         private float cameraPitch;
         private float horizontalSpeed;
         private float moveInputMagnitude;
+        private bool isGrounded;
+        private bool isCrouching;
+        private float recoilPitchOffset;
+        private float recoilRecoverySpeed = 18f;
+        private float standingHeight;
+        private float standingCenterY;
+        private float standingCameraLocalY;
+        private float characterBottomOffset;
+        private float crouchHeightVelocity;
+        private float crouchCameraVelocity;
+        private readonly Collider[] standCheckHits = new Collider[16];
+        private float nextFootstepAt;
+        private int footstepSequence;
+        private PlayerAudioController audioController;
+        [Header("Audio")]
+        [SerializeField] private float footstepIntervalSlow = 0.8f;
+        [SerializeField] private float footstepIntervalFast = 0.42f;
 
-        public bool IsGrounded => characterController != null && characterController.isGrounded;
+        public bool IsGrounded => isGrounded;
+        public bool IsCrouching => isCrouching;
+        public float CrouchBlend01
+        {
+            get
+            {
+                if (cameraPivot == null || crouchCameraOffset <= 0.001f)
+                {
+                    return isCrouching ? 1f : 0f;
+                }
+
+                var down = standingCameraLocalY - cameraPivot.localPosition.y;
+                return Mathf.Clamp01(down / Mathf.Max(0.001f, crouchCameraOffset));
+            }
+        }
         public float VerticalVelocity => verticalVelocity;
         public float HorizontalSpeed => horizontalSpeed;
         public float MoveInputMagnitude => moveInputMagnitude;
+        public float CurrentLookPitch => cameraPitch + recoilPitchOffset;
+        public int LastFootstepSequence => footstepSequence;
 
         public void Configure(Transform pivot, Camera localCamera, bool shouldLockCursor = true)
         {
@@ -55,6 +101,13 @@ namespace ShooterPrototype.Player
             {
                 playerCamera = GetComponentInChildren<Camera>();
             }
+            audioController = GetComponent<PlayerAudioController>();
+
+            standingHeight = characterController != null ? characterController.height : 1.8f;
+            standingCenterY = characterController != null ? characterController.center.y : standingHeight * 0.5f;
+            standingCameraLocalY = cameraPivot != null ? cameraPivot.localPosition.y : 1.6f;
+            characterBottomOffset = standingCenterY - (standingHeight * 0.5f);
+            isGrounded = EvaluateGrounded();
         }
 
         private void OnEnable()
@@ -94,12 +147,32 @@ namespace ShooterPrototype.Player
             transform.Rotate(Vector3.up * mouseX, Space.Self);
 
             cameraPitch -= mouseY;
-            cameraPitch = Mathf.Clamp(cameraPitch, -maxLookAngle, maxLookAngle);
-            cameraPivot.localRotation = Quaternion.Euler(cameraPitch, 0f, 0f);
+            var fallback = Mathf.Clamp(maxLookAngle, 1f, 89f);
+            var hipLimit = Mathf.Clamp(hipMaxLookAngle, 1f, 89f);
+            var adsLimit = Mathf.Clamp(adsMaxLookAngle, 1f, 89f);
+            var lookLimit = ReadAimPressed() ? adsLimit : hipLimit;
+            if (lookLimit <= 0f)
+            {
+                lookLimit = fallback;
+            }
+            cameraPitch = Mathf.Clamp(cameraPitch, -lookLimit, lookLimit);
+            recoilPitchOffset = Mathf.MoveTowards(recoilPitchOffset, 0f, recoilRecoverySpeed * Time.deltaTime);
+            cameraPivot.localRotation = Quaternion.Euler(cameraPitch + recoilPitchOffset, 0f, 0f);
+        }
+
+        public void ApplyRecoil(float pitchUpDegrees, float yawDegrees)
+        {
+            recoilPitchOffset -= Mathf.Abs(pitchUpDegrees);
+            if (Mathf.Abs(yawDegrees) > 0.0001f)
+            {
+                transform.Rotate(Vector3.up * yawDegrees, Space.Self);
+            }
         }
 
         private void TickMove()
         {
+            UpdateCrouchState();
+
             var moveInput = ReadMoveInput();
             var inputX = moveInput.x;
             var inputZ = moveInput.y;
@@ -111,24 +184,187 @@ namespace ShooterPrototype.Player
                 moveDirection.Normalize();
             }
 
-            if (characterController.isGrounded && verticalVelocity < 0f)
+            isGrounded = EvaluateGrounded();
+            if (isGrounded && verticalVelocity < 0f)
             {
                 verticalVelocity = -1.5f;
             }
 
-            if (characterController.isGrounded && ReadJumpPressed())
+            if (isGrounded && ReadJumpPressed())
             {
                 verticalVelocity = Mathf.Sqrt(jumpHeight * -2f * gravity);
+                audioController?.PlayJump(true);
             }
 
             verticalVelocity += gravity * Time.deltaTime;
 
-            var velocity = moveDirection * moveSpeed;
+            var speedMultiplier = isCrouching ? Mathf.Clamp(crouchSpeedMultiplier, 0.1f, 1f) : 1f;
+            var velocity = moveDirection * (moveSpeed * speedMultiplier);
             velocity.y = verticalVelocity;
             characterController.Move(velocity * Time.deltaTime);
+            isGrounded = EvaluateGrounded();
 
             var ccVelocity = characterController.velocity;
             horizontalSpeed = new Vector2(ccVelocity.x, ccVelocity.z).magnitude;
+            TryEmitFootstep();
+        }
+
+        public void PlayRemoteFootstep()
+        {
+            audioController?.PlayFootstep(false);
+        }
+
+        public void PlayRemoteJump()
+        {
+            audioController?.PlayJump(false);
+        }
+
+        private void TryEmitFootstep()
+        {
+            // Crouch movement is intentionally silent.
+            if (isCrouching)
+            {
+                return;
+            }
+
+            if (!isGrounded || moveInputMagnitude < 0.12f || Time.time < nextFootstepAt)
+            {
+                return;
+            }
+
+            var cadence = Mathf.Lerp(
+                Mathf.Max(0.1f, footstepIntervalSlow),
+                Mathf.Max(0.08f, footstepIntervalFast),
+                Mathf.Clamp01(horizontalSpeed / Mathf.Max(0.01f, moveSpeed)));
+
+            nextFootstepAt = Time.time + cadence;
+            footstepSequence++;
+            audioController?.PlayFootstep(true);
+        }
+
+        private void UpdateCrouchState()
+        {
+            if (characterController == null || cameraPivot == null)
+            {
+                return;
+            }
+
+            // Hold-to-crouch: input state directly drives crouch, no toggle.
+            var crouchPressed = ReadCrouchPressed();
+            if (!crouchPressed && isCrouching && !CanStandUp())
+            {
+                crouchPressed = true;
+            }
+
+            isCrouching = crouchPressed;
+
+            var targetHeight = isCrouching
+                ? Mathf.Clamp(crouchControllerHeight, 0.8f, standingHeight)
+                : standingHeight;
+            var smoothTime = isCrouching
+                ? Mathf.Max(0.01f, crouchDownSmoothTime)
+                : Mathf.Max(0.01f, crouchUpSmoothTime);
+            var nextHeight = Mathf.SmoothDamp(
+                characterController.height,
+                targetHeight,
+                ref crouchHeightVelocity,
+                smoothTime);
+            characterController.height = nextHeight;
+            var center = characterController.center;
+            center.y = characterBottomOffset + nextHeight * 0.5f;
+            characterController.center = center;
+
+            var targetCameraY = isCrouching
+                ? standingCameraLocalY - Mathf.Max(0.01f, crouchCameraOffset)
+                : standingCameraLocalY;
+            var cameraLocalPos = cameraPivot.localPosition;
+            cameraLocalPos.y = Mathf.SmoothDamp(
+                cameraLocalPos.y,
+                targetCameraY,
+                ref crouchCameraVelocity,
+                smoothTime);
+            cameraPivot.localPosition = cameraLocalPos;
+        }
+
+        private bool CanStandUp()
+        {
+            if (characterController == null)
+            {
+                return true;
+            }
+
+            var radius = Mathf.Max(0.05f, characterController.radius * 0.95f);
+            var bottomY = transform.position.y + characterBottomOffset + radius;
+            var desiredTopY = transform.position.y + characterBottomOffset + standingHeight - radius;
+            var bottom = new Vector3(transform.position.x, bottomY, transform.position.z);
+            var top = new Vector3(transform.position.x, desiredTopY, transform.position.z);
+            var hitCount = Physics.OverlapCapsuleNonAlloc(
+                bottom,
+                top,
+                radius,
+                standCheckHits,
+                groundedMask,
+                QueryTriggerInteraction.Ignore);
+            for (var i = 0; i < hitCount; i++)
+            {
+                var hit = standCheckHits[i];
+                if (hit == null)
+                {
+                    continue;
+                }
+
+                if (hit.transform.IsChildOf(transform))
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+
+        private bool EvaluateGrounded()
+        {
+            if (characterController == null)
+            {
+                return false;
+            }
+
+            var worldCenter = transform.TransformPoint(characterController.center);
+            var feetY = worldCenter.y - (characterController.height * 0.5f) + characterController.radius;
+            var radius = Mathf.Max(0.01f, groundedSphereRadius);
+            var castDistance = Mathf.Max(0.01f, groundedCheckDistance);
+            var castOrigin = new Vector3(
+                worldCenter.x,
+                feetY + radius + groundedSphereOffset,
+                worldCenter.z);
+
+            var hits = Physics.SphereCastAll(
+                castOrigin,
+                radius,
+                Vector3.down,
+                castDistance,
+                groundedMask,
+                QueryTriggerInteraction.Ignore);
+
+            for (var i = 0; i < hits.Length; i++)
+            {
+                var hitCollider = hits[i].collider;
+                if (hitCollider == null)
+                {
+                    continue;
+                }
+
+                if (hitCollider.transform.IsChildOf(transform))
+                {
+                    continue;
+                }
+
+                return true;
+            }
+
+            return false;
         }
 
         private static Vector2 ReadMoveInput()
@@ -171,6 +407,24 @@ namespace ShooterPrototype.Player
             return Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame;
 #else
             return Input.GetButtonDown("Jump");
+#endif
+        }
+
+        private static bool ReadAimPressed()
+        {
+#if ENABLE_INPUT_SYSTEM
+            return Mouse.current != null && Mouse.current.rightButton.isPressed;
+#else
+            return Input.GetMouseButton(1);
+#endif
+        }
+
+        private static bool ReadCrouchPressed()
+        {
+#if ENABLE_INPUT_SYSTEM
+            return Keyboard.current != null && Keyboard.current.leftCtrlKey.isPressed;
+#else
+            return Input.GetKey(KeyCode.LeftControl);
 #endif
         }
     }

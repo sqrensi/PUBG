@@ -114,6 +114,21 @@ namespace ShooterPrototype.Player
             {
                 instance.AddComponent<LocalPlayerMarker>();
             }
+            if (instance.GetComponent<PlayerAudioController>() == null)
+            {
+                instance.AddComponent<PlayerAudioController>();
+            }
+
+            var weaponController = instance.GetComponent<PlayerWeaponController>();
+            if (weaponController == null)
+            {
+                weaponController = instance.AddComponent<PlayerWeaponController>();
+            }
+            var localCamera = instance.GetComponentInChildren<Camera>(true);
+            if (localCamera != null)
+            {
+                weaponController.Configure(localCamera, null);
+            }
 
             if (enableMatchPresenceSync)
             {

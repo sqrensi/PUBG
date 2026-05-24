@@ -58,6 +58,12 @@ namespace ShooterPrototype.Bootstrap
                 Debug.Log("[GameBootstrap] Enabled Application.runInBackground for multiplayer local testing.");
             }
 
+            if (!Application.isBatchMode)
+            {
+                QualitySettings.antiAliasing = Mathf.Max(QualitySettings.antiAliasing, 4);
+                QualitySettings.anisotropicFiltering = AnisotropicFiltering.ForceEnable;
+            }
+
             if (networkLauncher == null)
             {
                 networkLauncher = GetComponent<NetworkLauncher>();
