@@ -1,4 +1,6 @@
 using System.Collections;
+using System.Collections.Generic;
+using ShooterPrototype.Network;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
@@ -18,6 +20,11 @@ namespace ShooterPrototype.Player
         [SerializeField] private float fireRate = 9f;
         [SerializeField] private float maxDistance = 180f;
         [SerializeField] private LayerMask hitMask = ~0;
+        [SerializeField] private bool detectTriggerHitboxes = true;
+        [SerializeField] private float legDamage = 15f;
+        [SerializeField] private float bodyDamage = 25f;
+        [SerializeField] private float neckDamage = 80f;
+        [SerializeField] private float headDamage = 100f;
         [SerializeField] private int magazineSize = 30;
         [SerializeField] private float reloadDuration = 1.8f;
         [SerializeField] private bool autoReloadWhenEmpty = true;
@@ -31,15 +38,18 @@ namespace ShooterPrototype.Player
         [SerializeField] private float spreadStartDegrees = 0.08f;
         [SerializeField] private float spreadPerShotDegrees = 0.22f;
         [SerializeField] private float spreadMaxDegrees = 2.3f;
-        [SerializeField] private float recoilPitchMin = 1.15f;
-        [SerializeField] private float recoilPitchMax = 1.95f;
-        [SerializeField] private float recoilYawScale = 0.9f;
+        [SerializeField] private float recoilPitchMin = 5.2f;
+        [SerializeField] private float recoilPitchMax = 7.4f;
+        [SerializeField] private float recoilYawScale = 1.35f;
         [SerializeField] private float hipFireSpreadMultiplier = 1.75f;
         [SerializeField] private float adsSpreadMultiplier = 0.65f;
         [SerializeField] private float crouchSpreadMultiplier = 0.82f;
-        [SerializeField] private float hipFireRecoilMultiplier = 1.25f;
-        [SerializeField] private float adsRecoilMultiplier = 0.78f;
-        [SerializeField] private float crouchRecoilMultiplier = 0.75f;
+        [SerializeField] private float movingSpreadMultiplier = 1.9f;
+        [SerializeField] private float jumpSpreadMultiplier = 2.8f;
+        [SerializeField] private float movingSpreadInputThreshold = 0.08f;
+        [SerializeField] private float hipFireRecoilMultiplier = 1.75f;
+        [SerializeField] private float adsRecoilMultiplier = 1.35f;
+        [SerializeField] private float crouchRecoilMultiplier = 1.2f;
         [SerializeField] private Vector2[] sprayPattern = new[]
         {
             new Vector2(0.0f, 1.0f), new Vector2(0.12f, 1.15f), new Vector2(-0.16f, 1.3f),
@@ -59,6 +69,7 @@ namespace ShooterPrototype.Player
         [SerializeField] private GameObject playerHitVfx;
         [SerializeField] private GameObject worldHitVfx;
         [SerializeField] private float vfxAutoDestroySeconds = 2f;
+        [SerializeField] private float headshotSingleRegistrationSeconds = 3.2f;
 
         private float nextFireTime;
         private float lastShotAt = -100f;
@@ -73,6 +84,9 @@ namespace ShooterPrototype.Player
         private FpsCharacterController fpsController;
         private PlayerWeaponMount weaponMount;
         private PlayerAudioController audioController;
+        private RealtimeTransportClient realtimeClient;
+        private readonly RaycastHit[] hitQueryBuffer = new RaycastHit[32];
+        private readonly Dictionary<string, float> headshotRegistrationUntilByTarget = new Dictionary<string, float>();
 
         public void Configure(Camera localCamera, Transform weaponMuzzle)
         {
@@ -98,29 +112,41 @@ namespace ShooterPrototype.Player
             fpsController = GetComponent<FpsCharacterController>();
             weaponMount = GetComponent<PlayerWeaponMount>();
             audioController = GetComponent<PlayerAudioController>();
+            realtimeClient = FindObjectOfType<RealtimeTransportClient>();
             currentAmmo = Mathf.Max(1, magazineSize);
         }
 
         private void Update()
         {
             TryResolveRuntimeMuzzle();
+            var firePressed = ReadFirePressed();
 
-            if (!enabled || Time.time < nextFireTime)
+            if (!enabled)
             {
+                fpsController?.SetAutoRecoilRecoveryActive(false);
                 return;
             }
+
+            fpsController?.SetAutoRecoilRecoveryActive(firePressed && !isReloading);
 
             if (ReadReloadPressed())
             {
                 TryStartReload();
             }
 
-            if (!ReadFirePressed())
+            // Reload input has priority over fire cadence: pressing reload while shooting
+            // immediately stops firing and starts the reload flow.
+            if (isReloading)
             {
                 return;
             }
 
-            if (isReloading)
+            if (Time.time < nextFireTime)
+            {
+                return;
+            }
+
+            if (!firePressed)
             {
                 return;
             }
@@ -197,6 +223,19 @@ namespace ShooterPrototype.Player
             audioController?.PlayHitPlayer(false);
         }
 
+        public void RestoreAfterRespawn()
+        {
+            currentAmmo = MagazineSize;
+            isReloading = false;
+            if (reloadCoroutine != null)
+            {
+                StopCoroutine(reloadCoroutine);
+                reloadCoroutine = null;
+            }
+
+            weaponMount?.SetLocalReloading(false);
+        }
+
         private Vector3 ResolveShootDirection(Vector3 muzzleOrigin)
         {
             if (playerCamera == null)
@@ -207,7 +246,7 @@ namespace ShooterPrototype.Player
             var ray = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
             ray = ApplySpreadToRay(ray);
             var target = ray.origin + ray.direction * maxDistance;
-            if (Physics.Raycast(ray, out var hit, maxDistance, hitMask, QueryTriggerInteraction.Ignore))
+            if (TryRaycastIgnoringSelf(ray, maxDistance, out var hit))
             {
                 target = hit.point;
             }
@@ -267,8 +306,8 @@ namespace ShooterPrototype.Player
             }
 
             var pitch = Random.Range(Mathf.Min(recoilPitchMin, recoilPitchMax), Mathf.Max(recoilPitchMin, recoilPitchMax));
-            pitch += pattern.y * 0.25f;
-            var yaw = pattern.x * recoilYawScale * 0.55f + Random.Range(-0.12f, 0.12f);
+            pitch += pattern.y * 1.1f;
+            var yaw = pattern.x * recoilYawScale * 0.9f + Random.Range(-0.32f, 0.32f);
             pitch *= recoilMultiplier;
             yaw *= recoilMultiplier;
             fpsController.ApplyRecoil(pitch, yaw);
@@ -288,6 +327,20 @@ namespace ShooterPrototype.Player
                 recoil *= crouchRecoilMultiplier;
             }
 
+            if (fpsController != null)
+            {
+                var moving = fpsController.IsGrounded && fpsController.MoveInputMagnitude > Mathf.Clamp01(movingSpreadInputThreshold);
+                if (moving)
+                {
+                    spread *= Mathf.Max(1f, movingSpreadMultiplier);
+                }
+
+                if (!fpsController.IsGrounded)
+                {
+                    spread *= Mathf.Max(1f, jumpSpreadMultiplier);
+                }
+            }
+
             return (spread, recoil);
         }
 
@@ -300,10 +353,10 @@ namespace ShooterPrototype.Player
                 ApplyRecoilKick();
             }
 
-            if (Physics.Raycast(origin, direction, out var hit, maxDistance, hitMask, QueryTriggerInteraction.Ignore))
+            if (TryRaycastIgnoringSelf(new Ray(origin, direction), maxDistance, out var hit))
             {
                 endPoint = hit.point;
-                SpawnHitVfx(hit);
+                SpawnHitVfx(hit, direction, applyRecoil);
             }
 
             if (showTracer)
@@ -323,16 +376,24 @@ namespace ShooterPrototype.Player
             return forwardWithPitch.sqrMagnitude > 0.00001f ? forwardWithPitch.normalized : transform.forward;
         }
 
-        private void SpawnHitVfx(RaycastHit hit)
+        private void SpawnHitVfx(RaycastHit hit, Vector3 shotDirection, bool notifyNetworkHit)
         {
+            var hitZone = ResolveHitZone(hit.collider);
             var playerHit = IsPlayerHit(hit.collider);
+            var registerThisHit = !playerHit || ShouldRegisterHitOnce(hit.collider, hitZone);
             var targetVfx = playerHit ? playerHitVfx : worldHitVfx;
             if (targetVfx == null)
             {
                 if (playerHit)
                 {
-                    hitPlayerSequence++;
-                    audioController?.PlayHitPlayer(true);
+                    if (registerThisHit)
+                    {
+                        TryPlayHeadshotAudio(hitZone);
+                        if (notifyNetworkHit)
+                        {
+                            TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone);
+                        }
+                    }
                 }
                 return;
             }
@@ -341,9 +402,50 @@ namespace ShooterPrototype.Player
             SpawnVfx(targetVfx, hit.point, Quaternion.LookRotation(normal, Vector3.up));
             if (playerHit)
             {
-                hitPlayerSequence++;
-                audioController?.PlayHitPlayer(true);
+                if (registerThisHit)
+                {
+                    TryPlayHeadshotAudio(hitZone);
+                    if (notifyNetworkHit)
+                    {
+                        TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone);
+                    }
+                }
             }
+        }
+
+        private bool ShouldRegisterHitOnce(Collider targetCollider, HitZone hitZone)
+        {
+            if (hitZone != HitZone.Head || targetCollider == null)
+            {
+                return true;
+            }
+
+            var targetKey = ResolveTargetRegistrationKey(targetCollider);
+            if (string.IsNullOrEmpty(targetKey))
+            {
+                return true;
+            }
+
+            if (headshotRegistrationUntilByTarget.TryGetValue(targetKey, out var lockUntil) &&
+                Time.time < lockUntil)
+            {
+                return false;
+            }
+
+            headshotRegistrationUntilByTarget[targetKey] =
+                Time.time + Mathf.Max(0.1f, headshotSingleRegistrationSeconds);
+            return true;
+        }
+
+        private static string ResolveTargetRegistrationKey(Collider targetCollider)
+        {
+            var identity = targetCollider.GetComponentInParent<PlayerNetworkIdentity>();
+            if (identity != null && !string.IsNullOrWhiteSpace(identity.TicketId))
+            {
+                return identity.TicketId.Trim();
+            }
+
+            return targetCollider.GetInstanceID().ToString();
         }
 
         private bool IsPlayerHit(Collider targetCollider)
@@ -353,7 +455,148 @@ namespace ShooterPrototype.Player
                 return false;
             }
 
-            return targetCollider.GetComponentInParent<FpsCharacterController>() != null;
+            return targetCollider.GetComponentInParent<FpsCharacterController>() != null ||
+                   targetCollider.GetComponentInParent<PlayerNetworkIdentity>() != null;
+        }
+
+        private float ResolveDamage(HitZone hitZone)
+        {
+            switch (hitZone)
+            {
+                case HitZone.Leg:
+                    return Mathf.Max(0f, legDamage);
+                case HitZone.Neck:
+                    return Mathf.Max(0f, neckDamage);
+                case HitZone.Head:
+                    return Mathf.Max(0f, headDamage);
+                default:
+                    return Mathf.Max(0f, bodyDamage);
+            }
+        }
+
+        private static HitZone ResolveHitZone(Collider targetCollider)
+        {
+            if (targetCollider == null)
+            {
+                return HitZone.Body;
+            }
+
+            var current = targetCollider.transform;
+            while (current != null)
+            {
+                var name = current.name;
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    var lower = name.ToLowerInvariant();
+                    if (lower.Contains("head"))
+                    {
+                        return HitZone.Head;
+                    }
+
+                    if (lower.Contains("neck"))
+                    {
+                        return HitZone.Neck;
+                    }
+
+                    if (lower.Contains("leg") || lower.Contains("foot"))
+                    {
+                        return HitZone.Leg;
+                    }
+                }
+
+                current = current.parent;
+            }
+
+            return HitZone.Body;
+        }
+
+        private void TryPlayHeadshotAudio(HitZone hitZone)
+        {
+            if (hitZone != HitZone.Head)
+            {
+                return;
+            }
+
+            hitPlayerSequence++;
+            audioController?.PlayHitPlayer(true);
+        }
+
+        private QueryTriggerInteraction ResolveHitQueryTriggerInteraction()
+        {
+            return detectTriggerHitboxes
+                ? QueryTriggerInteraction.Collide
+                : QueryTriggerInteraction.Ignore;
+        }
+
+        private bool TryRaycastIgnoringSelf(Ray ray, float distance, out RaycastHit closestHit)
+        {
+            var hitCount = Physics.RaycastNonAlloc(
+                ray,
+                hitQueryBuffer,
+                distance,
+                hitMask,
+                ResolveHitQueryTriggerInteraction());
+            if (hitCount <= 0)
+            {
+                closestHit = default;
+                return false;
+            }
+
+            System.Array.Sort(hitQueryBuffer, 0, hitCount, RaycastHitDistanceComparer.Instance);
+            for (var i = 0; i < hitCount; i++)
+            {
+                var hit = hitQueryBuffer[i];
+                if (hit.collider == null)
+                {
+                    continue;
+                }
+
+                if (hit.collider.transform.IsChildOf(transform))
+                {
+                    continue;
+                }
+
+                closestHit = hit;
+                return true;
+            }
+
+            closestHit = default;
+            return false;
+        }
+
+        private sealed class RaycastHitDistanceComparer : System.Collections.Generic.IComparer<RaycastHit>
+        {
+            public static readonly RaycastHitDistanceComparer Instance = new RaycastHitDistanceComparer();
+            public int Compare(RaycastHit x, RaycastHit y) => x.distance.CompareTo(y.distance);
+        }
+
+        private enum HitZone
+        {
+            Body = 0,
+            Leg = 1,
+            Neck = 2,
+            Head = 3
+        }
+
+        private void TrySendPlayerHitToServer(Collider targetCollider, Vector3 shotDirection, HitZone hitZone)
+        {
+            if (targetCollider == null)
+            {
+                return;
+            }
+
+            var identity = targetCollider.GetComponentInParent<PlayerNetworkIdentity>();
+            if (identity == null || identity.IsLocalPlayer || string.IsNullOrWhiteSpace(identity.TicketId))
+            {
+                return;
+            }
+
+            if (realtimeClient == null)
+            {
+                realtimeClient = FindObjectOfType<RealtimeTransportClient>();
+            }
+
+            realtimeClient?.SendHit(identity.TicketId, ResolveDamage(hitZone), shotDirection);
         }
 
         private void SpawnVfx(GameObject prefab, Vector3 position, Quaternion rotation)

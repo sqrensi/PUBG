@@ -24,6 +24,11 @@ namespace ShooterPrototype.Player
             ApplyViewMode();
         }
 
+        public void RefreshViewMode()
+        {
+            ApplyViewMode();
+        }
+
         private void Awake()
         {
             ApplyViewMode();

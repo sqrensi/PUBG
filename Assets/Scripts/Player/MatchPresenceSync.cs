@@ -38,6 +38,7 @@ namespace ShooterPrototype.Player
         private PlayerWeaponController localWeaponController;
         private FpsCharacterController localFpsController;
         private ProceduralLocomotionRig localLocomotionRig;
+        private PlayerHealth localHealth;
         private readonly Dictionary<string, RemoteAvatar> remoteAvatars = new Dictionary<string, RemoteAvatar>();
 
         private sealed class RemoteAvatar
@@ -50,6 +51,7 @@ namespace ShooterPrototype.Player
             public int LastAppliedReloadSeq = -1;
             public int LastAppliedHitPlayerSeq = -1;
             public int LastAppliedFootstepSeq = -1;
+            public bool WasDead;
             public readonly List<PresenceSnapshot> Snapshots = new List<PresenceSnapshot>();
         }
 
@@ -71,6 +73,7 @@ namespace ShooterPrototype.Player
             localWeaponController = GetComponent<PlayerWeaponController>();
             localFpsController = GetComponent<FpsCharacterController>();
             localLocomotionRig = GetComponent<ProceduralLocomotionRig>();
+            localHealth = GetComponent<PlayerHealth>();
             if (localLocomotionRig == null)
             {
                 localLocomotionRig = GetComponentInChildren<ProceduralLocomotionRig>(true);
@@ -112,6 +115,16 @@ namespace ShooterPrototype.Player
                 if (avatar.Root == null)
                 {
                     staleIds.Add(kv.Key);
+                    continue;
+                }
+
+                var avatarHealth = avatar.Root.GetComponent<PlayerHealth>();
+                if (avatarHealth != null && avatarHealth.IsDead)
+                {
+                    if (now - avatar.LastSeenAt > remoteStaleSeconds)
+                    {
+                        staleIds.Add(kv.Key);
+                    }
                     continue;
                 }
 
@@ -202,13 +215,15 @@ namespace ShooterPrototype.Player
                         localLocomotionRig = GetComponentInChildren<ProceduralLocomotionRig>(true);
                     }
 
-                    var isAiming = localWeaponMount != null && localWeaponMount.AdsBlend > 0.5f;
                     var shotSeq = localWeaponController != null ? localWeaponController.LastShotSequence : 0;
                     var reloadSeq = localWeaponController != null ? localWeaponController.LastReloadSequence : 0;
                     var hitPlayerSeq = localWeaponController != null ? localWeaponController.LastHitPlayerSequence : 0;
                     var footstepSeq = localFpsController != null ? localFpsController.LastFootstepSequence : 0;
                     var isCrouching = localFpsController != null && localFpsController.IsCrouching;
                     var wallAvoidBlend = localWeaponMount != null ? localWeaponMount.CurrentWallAvoidBlend : 0f;
+                    var isDead = localHealth != null && localHealth.IsDead;
+                    var deathSeq = localHealth != null ? localHealth.DeathSequence : 0;
+                    var deathFallDirection = localHealth != null ? localHealth.DeathFallDirection : Vector3.forward;
                     var lookPitch = localFpsController != null ? localFpsController.CurrentLookPitch : 0f;
                     var animSpeed = localLocomotionRig != null
                         ? localLocomotionRig.CurrentSpeed01
@@ -233,7 +248,10 @@ namespace ShooterPrototype.Player
                         footstepSeq,
                         isCrouching,
                         wallAvoidBlend,
-                        isAiming,
+                        isDead,
+                        deathSeq,
+                        deathFallDirection,
+                        false,
                         animSpeed,
                         animGrounded,
                         animJumpState,
@@ -315,7 +333,14 @@ namespace ShooterPrototype.Player
                         avatar.LastAppliedReloadSeq = Mathf.Max(0, p.reloadSeq);
                         avatar.LastAppliedHitPlayerSeq = Mathf.Max(0, p.hitPlayerSeq);
                         avatar.LastAppliedFootstepSeq = Mathf.Max(0, p.footstepSeq);
+                        avatar.WasDead = p.isDead;
                         remoteAvatars[p.ticketId] = avatar;
+                    }
+
+                    if (avatar.WasDead && !p.isDead)
+                    {
+                        RemoveAvatar(p.ticketId);
+                        continue;
                     }
 
                     avatar.LastSeenAt = now;
@@ -331,7 +356,7 @@ namespace ShooterPrototype.Player
                     if (weaponMount != null)
                     {
                         weaponMount.SetNetworkLookPitch(p.lookPitch);
-                        weaponMount.SetNetworkAimState(p.isAiming);
+                        weaponMount.SetNetworkAimState(false);
                         weaponMount.SetNetworkCrouchState(p.isCrouching);
                         weaponMount.SetNetworkWallAvoidBlend(p.wallAvoidBlend);
                     }
@@ -351,6 +376,13 @@ namespace ShooterPrototype.Player
                             p.animPhase,
                             p.isCrouching);
                     }
+
+                    var health = avatar.Root.GetComponent<PlayerHealth>();
+                    health?.SetNetworkDeadState(
+                        p.isDead,
+                        p.deathSeq,
+                        new Vector3(p.deathFallDirX, p.deathFallDirY, p.deathFallDirZ));
+                    avatar.WasDead = p.isDead;
                 }
             }
 
@@ -383,6 +415,13 @@ namespace ShooterPrototype.Player
                 presentation.Configure(false);
             }
 
+            var identity = root.GetComponent<PlayerNetworkIdentity>();
+            if (identity == null)
+            {
+                identity = root.AddComponent<PlayerNetworkIdentity>();
+            }
+            identity.Configure(ticketId, false);
+
             EnsureRemoteVisuals(root);
 
             var fpsController = root.GetComponent<FpsCharacterController>();
@@ -397,6 +436,13 @@ namespace ShooterPrototype.Player
                 weaponController = root.AddComponent<PlayerWeaponController>();
             }
             weaponController.enabled = false;
+            var health = root.GetComponent<PlayerHealth>();
+            if (health == null)
+            {
+                health = root.AddComponent<PlayerHealth>();
+            }
+            health.SetNetworkMode(true);
+            health.SetNetworkDeadState(false, 0, Vector3.forward);
             if (root.GetComponent<PlayerAudioController>() == null)
             {
                 root.AddComponent<PlayerAudioController>();
@@ -424,11 +470,7 @@ namespace ShooterPrototype.Player
                 Destroy(selfSync);
             }
 
-            var characterController = root.GetComponent<CharacterController>();
-            if (characterController != null)
-            {
-                characterController.enabled = false;
-            }
+            // Keep CharacterController enabled on remote avatars so they are hittable by raycasts.
 
             var cameras = root.GetComponentsInChildren<Camera>(true);
             for (var i = 0; i < cameras.Length; i++)

@@ -26,6 +26,7 @@ namespace ShooterPrototype.UI
         private Text pingText;
         private Text fpsText;
         private Text ammoText;
+        private Text healthText;
         private Button backButton;
         private Button muteButton;
         private Text muteButtonLabel;
@@ -170,6 +171,7 @@ namespace ShooterPrototype.UI
                 pingText != null &&
                 fpsText != null &&
                 ammoText != null &&
+                healthText != null &&
                 backButton != null &&
                 muteButton != null &&
                 muteButtonLabel != null)
@@ -195,7 +197,8 @@ namespace ShooterPrototype.UI
             pingText = CreateLabel(panelObject.transform, "PingText", new Vector2(10f, -58f), "Ping: -- ms");
             fpsText = CreateLabel(panelObject.transform, "FpsText", new Vector2(10f, -82f), "FPS: --");
             ammoText = CreateLabel(panelObject.transform, "AmmoText", new Vector2(10f, -106f), "Ammo: --/--");
-            panelRect.sizeDelta = new Vector2(0f, 132f);
+            healthText = CreateLabel(panelObject.transform, "HealthText", new Vector2(10f, -130f), "HP: --/--");
+            panelRect.sizeDelta = new Vector2(0f, 156f);
 
             var buttonObject = new GameObject("BackButton");
             buttonObject.transform.SetParent(panelObject.transform, false);
@@ -429,6 +432,7 @@ namespace ShooterPrototype.UI
 
             fpsText.text = $"FPS: {Mathf.RoundToInt(fpsSmoothed)}";
             RefreshAmmoText();
+            RefreshHealthText();
         }
 
         private void RefreshAmmoText()
@@ -448,6 +452,25 @@ namespace ShooterPrototype.UI
 
             var suffix = weapon.IsReloading ? " (reloading)" : string.Empty;
             ammoText.text = $"Ammo: {weapon.CurrentAmmo}/{weapon.MagazineSize}{suffix}";
+        }
+
+        private void RefreshHealthText()
+        {
+            if (healthText == null)
+            {
+                return;
+            }
+
+            var local = FindObjectOfType<ShooterPrototype.Player.LocalPlayerMarker>();
+            var health = local != null ? local.GetComponent<ShooterPrototype.Player.PlayerHealth>() : null;
+            if (health == null)
+            {
+                healthText.text = "HP: --/--";
+                return;
+            }
+
+            var suffix = health.IsDead ? " (dead)" : string.Empty;
+            healthText.text = $"HP: {Mathf.CeilToInt(health.CurrentHealth)}/{Mathf.CeilToInt(health.MaxHealth)}{suffix}";
         }
 
         private void RefreshMuteButtonText()

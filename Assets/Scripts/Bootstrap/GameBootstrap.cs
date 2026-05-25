@@ -60,8 +60,15 @@ namespace ShooterPrototype.Bootstrap
 
             if (!Application.isBatchMode)
             {
-                QualitySettings.antiAliasing = Mathf.Max(QualitySettings.antiAliasing, 4);
+                QualitySettings.antiAliasing = Mathf.Max(QualitySettings.antiAliasing, 8);
                 QualitySettings.anisotropicFiltering = AnisotropicFiltering.ForceEnable;
+                QualitySettings.globalTextureMipmapLimit = 0;
+                QualitySettings.streamingMipmapsActive = false;
+                QualitySettings.lodBias = Mathf.Max(2f, QualitySettings.lodBias);
+                QualitySettings.shadowResolution = ShadowResolution.VeryHigh;
+                QualitySettings.shadowDistance = Mathf.Max(120f, QualitySettings.shadowDistance);
+                QualitySettings.pixelLightCount = Mathf.Max(4, QualitySettings.pixelLightCount);
+                ScalableBufferManager.ResizeBuffers(1f, 1f);
             }
 
             if (networkLauncher == null)

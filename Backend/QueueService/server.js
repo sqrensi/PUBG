@@ -278,6 +278,11 @@ wsServer.on("connection", (socket) => {
       return;
     }
 
+    if (message.type === "hit") {
+      handleWsHit(socket, message);
+      return;
+    }
+
     if (DEBUG_REALTIME) {
       console.log(`[rt][message-unknown] type=${String(message.type)}`);
     }
@@ -551,6 +556,11 @@ function matchTicketToSession(ticket, session, nowMs) {
       footstepSeq: 0,
       isCrouching: false,
       wallAvoidBlend: 0,
+      isDead: false,
+      deathSeq: 0,
+      deathFallDirX: 0,
+      deathFallDirY: 0,
+      deathFallDirZ: 0,
       hasPose: false,
       animSpeed: 0,
       isAiming: false,
@@ -594,6 +604,11 @@ function handleWsJoin(socket, ticketId) {
       footstepSeq: 0,
       isCrouching: false,
       wallAvoidBlend: 0,
+      isDead: false,
+      deathSeq: 0,
+      deathFallDirX: 0,
+      deathFallDirY: 0,
+      deathFallDirZ: 0,
       hasPose: false,
       animSpeed: 0,
       isAiming: false,
@@ -654,6 +669,11 @@ function handleWsPose(socket, message) {
   const footstepSeq = Math.max(0, normalizeInt64(message.footstepSeq, 0));
   const isCrouching = !!message.isCrouching;
   const wallAvoidBlend = Math.max(0, Math.min(1, normalizeNumber(message.wallAvoidBlend, 0)));
+  const isDead = !!message.isDead;
+  const deathSeq = Math.max(0, normalizeInt64(message.deathSeq, 0));
+  const deathFallDirX = normalizeNumber(message.deathFallDirX, 0);
+  const deathFallDirY = normalizeNumber(message.deathFallDirY, 0);
+  const deathFallDirZ = normalizeNumber(message.deathFallDirZ, 0);
   const animSpeed = Math.max(0, Math.min(1, normalizeNumber(message.animSpeed, 0)));
   const isAiming = !!message.isAiming;
   const isGrounded = !!message.isGrounded;
@@ -672,6 +692,11 @@ function handleWsPose(socket, message) {
     footstepSeq,
     isCrouching,
     wallAvoidBlend,
+    isDead,
+    deathSeq,
+    deathFallDirX,
+    deathFallDirY,
+    deathFallDirZ,
     hasPose: true,
     animSpeed,
     isAiming,
@@ -704,6 +729,66 @@ function handleWsPose(socket, message) {
     poseTelemetry.lastPoseSeq = poseSeq;
   }
   touchMatchSession(ticket.matchId);
+}
+
+function handleWsHit(socket, message) {
+  const meta = wsMetaBySocket.get(socket);
+  if (!meta || !meta.ticketId) {
+    return;
+  }
+
+  const attackerTicket = ticketsById.get(meta.ticketId);
+  if (!attackerTicket || attackerTicket.status !== "Matched" || !attackerTicket.matchId) {
+    return;
+  }
+
+  const rawTargetTicketId = typeof message.targetTicketId === "string" ? message.targetTicketId.trim() : "";
+  if (!rawTargetTicketId || rawTargetTicketId === attackerTicket.ticketId) {
+    return;
+  }
+
+  const targetTicket = ticketsById.get(rawTargetTicketId);
+  if (!targetTicket || targetTicket.status !== "Matched" || targetTicket.matchId !== attackerTicket.matchId) {
+    return;
+  }
+
+  const damage = Math.max(0, Math.min(1000, normalizeNumber(message.damage, 0)));
+  if (damage <= 0) {
+    return;
+  }
+
+  let dirX = normalizeNumber(message.dirX, 0);
+  let dirY = normalizeNumber(message.dirY, 0);
+  let dirZ = normalizeNumber(message.dirZ, 0);
+  const dirMag = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
+  if (dirMag > 0.0001) {
+    dirX /= dirMag;
+    dirY /= dirMag;
+    dirZ /= dirMag;
+  } else {
+    dirX = 0;
+    dirY = 0;
+    dirZ = 1;
+  }
+
+  const targetSocket = wsClientsByTicketId.get(targetTicket.ticketId);
+  if (!targetSocket || targetSocket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  try {
+    targetSocket.send(JSON.stringify({
+      type: "damage",
+      attackerTicketId: attackerTicket.ticketId,
+      targetTicketId: targetTicket.ticketId,
+      damage,
+      dirX,
+      dirY,
+      dirZ
+    }));
+  } catch {
+    // ignored
+  }
 }
 
 function handleWsDisconnect(socket) {
@@ -821,6 +906,11 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       footstepSeq: Number.isFinite(ticket.presence.footstepSeq) ? ticket.presence.footstepSeq : 0,
       isCrouching: !!ticket.presence.isCrouching,
       wallAvoidBlend: Number.isFinite(ticket.presence.wallAvoidBlend) ? ticket.presence.wallAvoidBlend : 0,
+      isDead: !!ticket.presence.isDead,
+      deathSeq: Number.isFinite(ticket.presence.deathSeq) ? ticket.presence.deathSeq : 0,
+      deathFallDirX: Number.isFinite(ticket.presence.deathFallDirX) ? ticket.presence.deathFallDirX : 0,
+      deathFallDirY: Number.isFinite(ticket.presence.deathFallDirY) ? ticket.presence.deathFallDirY : 0,
+      deathFallDirZ: Number.isFinite(ticket.presence.deathFallDirZ) ? ticket.presence.deathFallDirZ : 0,
       animSpeed: ticket.presence.animSpeed || 0,
       isAiming: !!ticket.presence.isAiming,
       isGrounded: ticket.presence.isGrounded !== false,

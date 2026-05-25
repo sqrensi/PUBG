@@ -114,9 +114,18 @@ namespace ShooterPrototype.Player
             {
                 instance.AddComponent<LocalPlayerMarker>();
             }
+            var identity = instance.GetComponent<PlayerNetworkIdentity>();
+            if (identity == null)
+            {
+                identity = instance.AddComponent<PlayerNetworkIdentity>();
+            }
             if (instance.GetComponent<PlayerAudioController>() == null)
             {
                 instance.AddComponent<PlayerAudioController>();
+            }
+            if (instance.GetComponent<PlayerHealth>() == null)
+            {
+                instance.AddComponent<PlayerHealth>();
             }
 
             var weaponController = instance.GetComponent<PlayerWeaponController>();
@@ -127,6 +136,7 @@ namespace ShooterPrototype.Player
             var localCamera = instance.GetComponentInChildren<Camera>(true);
             if (localCamera != null)
             {
+                ApplyCameraClaritySettings(localCamera);
                 weaponController.Configure(localCamera, null);
             }
 
@@ -169,6 +179,19 @@ namespace ShooterPrototype.Player
             var remotePrefab = remotePlayerPrefab != null ? remotePlayerPrefab : playerPrefab;
             realtimeClient.Connect(launcher.CurrentTicketId);
             sync.Initialize(launcher, realtimeClient, launcher.CurrentTicketId, remotePrefab);
+            var identity = localPlayer.GetComponent<PlayerNetworkIdentity>();
+            identity?.Configure(launcher.CurrentTicketId, true);
+        }
+
+        private static void ApplyCameraClaritySettings(Camera targetCamera)
+        {
+            if (targetCamera == null)
+            {
+                return;
+            }
+
+            targetCamera.allowMSAA = true;
+            targetCamera.allowHDR = true;
         }
 
         private bool TryResolveSpawnPose(out Vector3 position, out Quaternion rotation)

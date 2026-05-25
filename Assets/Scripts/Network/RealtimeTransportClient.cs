@@ -22,6 +22,11 @@ namespace ShooterPrototype.Network
             public int footstepSeq;
             public bool isCrouching;
             public float wallAvoidBlend;
+            public bool isDead;
+            public int deathSeq;
+            public float deathFallDirX;
+            public float deathFallDirY;
+            public float deathFallDirZ;
             public float animSpeed;
             public bool isAiming;
             public bool isGrounded;
@@ -63,6 +68,29 @@ namespace ShooterPrototype.Network
         }
 
         [Serializable]
+        private sealed class HitMessage
+        {
+            public string type;
+            public string targetTicketId;
+            public float damage;
+            public float dirX;
+            public float dirY;
+            public float dirZ;
+        }
+
+        [Serializable]
+        public sealed class DamageMessage
+        {
+            public string type;
+            public string attackerTicketId;
+            public string targetTicketId;
+            public float damage;
+            public float dirX;
+            public float dirY;
+            public float dirZ;
+        }
+
+        [Serializable]
         private sealed class PoseMessage
         {
             public string type;
@@ -75,6 +103,11 @@ namespace ShooterPrototype.Network
             public int footstepSeq;
             public bool isCrouching;
             public float wallAvoidBlend;
+            public bool isDead;
+            public int deathSeq;
+            public float deathFallDirX;
+            public float deathFallDirY;
+            public float deathFallDirZ;
             public float animSpeed;
             public bool isAiming;
             public bool isGrounded;
@@ -106,6 +139,7 @@ namespace ShooterPrototype.Network
         public bool IsConnecting => isConnecting;
         public bool IsReady => IsConnected && hasJoinAck;
         public string ConnectedTicketId => connectedTicketId;
+        public event Action<DamageMessage> DamageReceived;
 
         public void Configure(string wsUrl)
         {
@@ -155,6 +189,9 @@ namespace ShooterPrototype.Network
             int footstepSeq = 0,
             bool isCrouching = false,
             float wallAvoidBlend = 0f,
+            bool isDead = false,
+            int deathSeq = 0,
+            Vector3 deathFallDirection = default,
             bool isAiming = false,
             float animSpeed = 0f,
             bool isGrounded = true,
@@ -183,6 +220,11 @@ namespace ShooterPrototype.Network
                 footstepSeq = Math.Max(0, footstepSeq),
                 isCrouching = isCrouching,
                 wallAvoidBlend = Mathf.Clamp01(wallAvoidBlend),
+                isDead = isDead,
+                deathSeq = Math.Max(0, deathSeq),
+                deathFallDirX = deathFallDirection.x,
+                deathFallDirY = deathFallDirection.y,
+                deathFallDirZ = deathFallDirection.z,
                 animSpeed = Mathf.Clamp01(animSpeed),
                 isAiming = isAiming,
                 isGrounded = isGrounded,
@@ -210,6 +252,25 @@ namespace ShooterPrototype.Network
                 snapshot = latestSnapshot;
                 return true;
             }
+        }
+
+        public void SendHit(string targetTicketId, float damage, Vector3 hitDirection)
+        {
+            if (!IsConnected || string.IsNullOrWhiteSpace(targetTicketId))
+            {
+                return;
+            }
+
+            var direction = hitDirection.sqrMagnitude > 0.0001f ? hitDirection.normalized : Vector3.forward;
+            _ = SendJsonAsync(new HitMessage
+            {
+                type = "hit",
+                targetTicketId = targetTicketId.Trim(),
+                damage = Mathf.Max(0f, damage),
+                dirX = direction.x,
+                dirY = direction.y,
+                dirZ = direction.z
+            }, cts != null ? cts.Token : CancellationToken.None);
         }
 
         private async Task ConnectInternalAsync(string ticketId)
@@ -316,6 +377,22 @@ namespace ShooterPrototype.Network
 
             if (snapshot == null || !string.Equals(snapshot.type, "snapshot", StringComparison.Ordinal))
             {
+                DamageMessage damageMessage = null;
+                try
+                {
+                    damageMessage = JsonUtility.FromJson<DamageMessage>(json);
+                }
+                catch
+                {
+                    // ignored
+                }
+
+                if (damageMessage != null && string.Equals(damageMessage.type, "damage", StringComparison.Ordinal))
+                {
+                    DamageReceived?.Invoke(damageMessage);
+                    return;
+                }
+
                 var joined = JsonUtility.FromJson<JoinedMessage>(json);
                 if (joined != null &&
                     string.Equals(joined.type, "joined", StringComparison.Ordinal) &&

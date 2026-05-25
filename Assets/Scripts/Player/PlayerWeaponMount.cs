@@ -66,6 +66,9 @@ namespace ShooterPrototype.Player
         [SerializeField] private Vector3 adsSightEulerOffset = Vector3.zero;
         [SerializeField] private float adsFollowPitchDownLimit = -40f;
         [SerializeField] private float adsFollowPitchUpLimit = 30f;
+        [SerializeField] private bool enableAdsCameraZoom = true;
+        [SerializeField] private float adsCameraFov = 55f;
+        [SerializeField] private float adsCameraZoomSmoothTime = 0.08f;
         [Header("Crouch")]
         [SerializeField] private float crouchWeaponDrop = 0.18f;
         [SerializeField] private float crouchBlendSmoothTime = 0.16f;
@@ -120,6 +123,9 @@ namespace ShooterPrototype.Player
         private float wallAvoidBlend;
         private float wallAvoidBlendVelocity;
         private FpsCharacterController fpsController;
+        private Camera localPlayerCamera;
+        private float baseCameraFov = -1f;
+        private float adsCameraFovVelocity;
         private Transform leftHandTargetTransform;
         private Transform rightHandTargetTransform;
         private Transform magHandTargetTransform;
@@ -254,6 +260,8 @@ namespace ShooterPrototype.Player
                 // even while visual ADS blend is still fading out.
                 adsPitchFollowBlend = 0f;
             }
+
+            UpdateAdsCameraZoom();
 
             if (fpsController == null)
             {
@@ -446,6 +454,24 @@ namespace ShooterPrototype.Player
                 {
                     cameraPivot = foundPivot;
                 }
+            }
+
+            if (localPlayerCamera == null)
+            {
+                if (cameraPivot != null)
+                {
+                    localPlayerCamera = cameraPivot.GetComponentInChildren<Camera>(true);
+                }
+
+                if (localPlayerCamera == null)
+                {
+                    localPlayerCamera = GetComponentInChildren<Camera>(true);
+                }
+            }
+
+            if (localPlayerCamera != null && baseCameraFov <= 0f)
+            {
+                baseCameraFov = localPlayerCamera.fieldOfView;
             }
 
             if (fpsController == null)
@@ -744,6 +770,45 @@ namespace ShooterPrototype.Player
 #else
             return Input.GetMouseButton(1);
 #endif
+        }
+
+        private void UpdateAdsCameraZoom()
+        {
+            if (useNetworkState || !enableAdsCameraZoom)
+            {
+                return;
+            }
+
+            if (localPlayerCamera == null)
+            {
+                if (cameraPivot != null)
+                {
+                    localPlayerCamera = cameraPivot.GetComponentInChildren<Camera>(true);
+                }
+
+                if (localPlayerCamera == null)
+                {
+                    localPlayerCamera = GetComponentInChildren<Camera>(true);
+                }
+            }
+
+            if (localPlayerCamera == null)
+            {
+                return;
+            }
+
+            if (baseCameraFov <= 0f)
+            {
+                baseCameraFov = localPlayerCamera.fieldOfView;
+            }
+
+            var targetAdsFov = Mathf.Clamp(adsCameraFov, 20f, 179f);
+            var targetFov = Mathf.Lerp(baseCameraFov, targetAdsFov, Mathf.Clamp01(adsBlend));
+            localPlayerCamera.fieldOfView = Mathf.SmoothDamp(
+                localPlayerCamera.fieldOfView,
+                targetFov,
+                ref adsCameraFovVelocity,
+                Mathf.Max(0.01f, adsCameraZoomSmoothTime));
         }
     }
 }
