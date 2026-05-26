@@ -14,6 +14,7 @@ namespace ShooterPrototype.Bootstrap
         [SerializeField] private LaunchMode overrideLaunchMode = LaunchMode.AutoDetect;
         [SerializeField] private bool keepAliveAcrossScenes = true;
         [SerializeField] private bool runClientInBackground = true;
+        [SerializeField] private PerformancePresetController performancePreset;
         [SerializeField] private NetworkConfig networkConfig;
         [SerializeField] private NetworkLauncher networkLauncher;
         [SerializeField] private bool createRuntimeQueueApiClient = true;
@@ -60,15 +61,7 @@ namespace ShooterPrototype.Bootstrap
 
             if (!Application.isBatchMode)
             {
-                QualitySettings.antiAliasing = Mathf.Max(QualitySettings.antiAliasing, 8);
-                QualitySettings.anisotropicFiltering = AnisotropicFiltering.ForceEnable;
-                QualitySettings.globalTextureMipmapLimit = 0;
-                QualitySettings.streamingMipmapsActive = false;
-                QualitySettings.lodBias = Mathf.Max(2f, QualitySettings.lodBias);
-                QualitySettings.shadowResolution = ShadowResolution.VeryHigh;
-                QualitySettings.shadowDistance = Mathf.Max(120f, QualitySettings.shadowDistance);
-                QualitySettings.pixelLightCount = Mathf.Max(4, QualitySettings.pixelLightCount);
-                ScalableBufferManager.ResizeBuffers(1f, 1f);
+                EnsurePerformancePreset();
             }
 
             if (networkLauncher == null)
@@ -132,7 +125,7 @@ namespace ShooterPrototype.Bootstrap
                     gameHudController = gameObject.AddComponent<GameHudController>();
                 }
 
-                gameHudController.Initialize(networkLauncher, mainMenuSceneName);
+                gameHudController.Initialize(networkLauncher, mainMenuSceneName, performancePreset);
                 HandleSceneLoaded(SceneManager.GetActiveScene(), LoadSceneMode.Single);
             }
 
@@ -189,6 +182,19 @@ namespace ShooterPrototype.Bootstrap
             if (playerSpawnManager != null)
             {
                 playerSpawnManager.HandleSceneLoaded(scene);
+            }
+        }
+
+        private void EnsurePerformancePreset()
+        {
+            if (performancePreset == null)
+            {
+                performancePreset = GetComponent<PerformancePresetController>();
+            }
+
+            if (performancePreset == null)
+            {
+                performancePreset = gameObject.AddComponent<PerformancePresetController>();
             }
         }
     }

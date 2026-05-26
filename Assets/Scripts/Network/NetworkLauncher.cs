@@ -16,6 +16,7 @@ namespace ShooterPrototype.Network
         private bool isClientConnected;
         private string lastConnectionError = string.Empty;
         private int lastConnectLatencyMs = -1;
+        private int lastMeasuredPingMs = -1;
         private string currentMatchId = string.Empty;
         private int currentMatchPlayerCount;
         private string currentTicketId = string.Empty;
@@ -31,6 +32,7 @@ namespace ShooterPrototype.Network
         public NetworkConfig Config => config;
         public string LastConnectionError => lastConnectionError;
         public int LastConnectLatencyMs => lastConnectLatencyMs;
+        public int LastMeasuredPingMs => lastMeasuredPingMs > 0 ? lastMeasuredPingMs : lastConnectLatencyMs;
         public string CurrentMatchId => currentMatchId;
         public int CurrentMatchPlayerCount => currentMatchPlayerCount;
         public string CurrentTicketId => currentTicketId;
@@ -160,6 +162,7 @@ namespace ShooterPrototype.Network
             {
                 isClientConnected = true;
                 lastConnectLatencyMs = Mathf.Max(1, (int)stopwatch.ElapsedMilliseconds);
+                lastMeasuredPingMs = lastConnectLatencyMs;
                 connectedServerAddress = address;
                 connectedServerPort = port;
                 EmitStatus($"Connected to server {address}:{port}.");
@@ -257,7 +260,9 @@ namespace ShooterPrototype.Network
                 return -1;
             }
 
-            return Mathf.Max(1, (int)stopwatch.ElapsedMilliseconds);
+            var pingMs = Mathf.Max(1, (int)stopwatch.ElapsedMilliseconds);
+            lastMeasuredPingMs = pingMs;
+            return pingMs;
         }
 
         private async Task AcceptLoopAsync(CancellationToken cancellationToken)

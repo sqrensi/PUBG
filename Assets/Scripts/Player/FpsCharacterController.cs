@@ -17,7 +17,10 @@ namespace ShooterPrototype.Player
         [SerializeField] private float jumpHeight = 1.25f;
         [SerializeField] private float gravity = -24f;
         [SerializeField] private float crouchSpeedMultiplier = 0.55f;
-        [SerializeField] private float sneakSpeedMultiplier = 0.78f;
+        [SerializeField] private float sprintSpeedMultiplier = 1.55f;
+        [SerializeField] private float sprintMinForwardInput = 0.1f;
+        [SerializeField] private float sideSpeedMultiplier = 0.85f;
+        [SerializeField] private float backwardSpeedMultiplier = 0.75f;
         [SerializeField] private float crouchControllerHeight = 1f;
         [SerializeField] private float crouchDownSmoothTime = 0.18f;
         [SerializeField] private float crouchUpSmoothTime = 0.22f;
@@ -47,9 +50,12 @@ namespace ShooterPrototype.Player
         private float cameraPitch;
         private float horizontalSpeed;
         private float moveInputMagnitude;
+        private float networkMoveInputX;
+        private float networkMoveInputZ;
+        private bool networkJumpPressed;
         private bool isGrounded;
         private bool isCrouching;
-        private bool isSneaking;
+        private bool isSprinting;
         private float recoilPitchOffset;
         private float recoilRecoverySpeed = 18f;
         private float recoilRecoveryBoostUntil;
@@ -68,10 +74,23 @@ namespace ShooterPrototype.Player
         [Header("Audio")]
         [SerializeField] private float footstepIntervalSlow = 0.8f;
         [SerializeField] private float footstepIntervalFast = 0.42f;
+        [SerializeField] private float footstepIntervalSprint = 0.28f;
+
+        [Header("Network reconciliation")]
+        [SerializeField] private bool enableServerReconciliation = true;
+        [SerializeField] private float reconcileSnapDistance = 1.15f;
+        [SerializeField] private float reconcileBlendSpeed = 16f;
+        [SerializeField] private float reconcileMinError = 0.04f;
+
+        private int lastReconciledServerTick = -1;
+        private bool reconciliationSuspended;
+        private float reconciliationGraceUntilRealtime;
 
         public bool IsGrounded => isGrounded;
         public bool IsCrouching => isCrouching;
-        public bool IsSneaking => isSneaking;
+        public bool IsSprinting => isSprinting;
+        public float SprintSpeedMultiplier => Mathf.Clamp(sprintSpeedMultiplier, 1f, 3f);
+        public float MaxHorizontalMoveSpeed => moveSpeed * (isSprinting ? SprintSpeedMultiplier : 1f);
         public float CrouchBlend01
         {
             get
@@ -88,8 +107,64 @@ namespace ShooterPrototype.Player
         public float VerticalVelocity => verticalVelocity;
         public float HorizontalSpeed => horizontalSpeed;
         public float MoveInputMagnitude => moveInputMagnitude;
+        public float NetworkMoveInputX => networkMoveInputX;
+        public float NetworkMoveInputZ => networkMoveInputZ;
+        public bool NetworkJumpPressed => networkJumpPressed;
         public float CurrentLookPitch => cameraPitch + recoilPitchOffset;
         public int LastFootstepSequence => footstepSequence;
+
+        public void SetServerReconciliationSuspended(bool suspended)
+        {
+            reconciliationSuspended = suspended;
+        }
+
+        public void NotifyLocalRespawned(float graceSeconds = 1f)
+        {
+            reconciliationSuspended = false;
+            lastReconciledServerTick = -1;
+            reconciliationGraceUntilRealtime = Time.realtimeSinceStartup + Mathf.Max(0.1f, graceSeconds);
+        }
+
+        public void ReconcileToServer(Vector3 authoritativePosition, float authoritativeYaw, int serverTick)
+        {
+            if (!enableServerReconciliation ||
+                reconciliationSuspended ||
+                Time.realtimeSinceStartup < reconciliationGraceUntilRealtime ||
+                characterController == null ||
+                !characterController.enabled ||
+                serverTick <= lastReconciledServerTick)
+            {
+                return;
+            }
+
+            lastReconciledServerTick = serverTick;
+
+            var delta = authoritativePosition - transform.position;
+            var horizontalError = new Vector2(delta.x, delta.z).magnitude;
+            if (horizontalError >= reconcileSnapDistance)
+            {
+                characterController.enabled = false;
+                transform.position = new Vector3(
+                    authoritativePosition.x,
+                    authoritativePosition.y,
+                    authoritativePosition.z);
+                characterController.enabled = true;
+                return;
+            }
+
+            if (horizontalError > reconcileMinError)
+            {
+                var move = new Vector3(delta.x, 0f, delta.z);
+                characterController.Move(move * Mathf.Clamp01(Time.deltaTime * reconcileBlendSpeed));
+            }
+
+            var yawDelta = Mathf.Abs(Mathf.DeltaAngle(transform.eulerAngles.y, authoritativeYaw));
+            if (yawDelta > 2f)
+            {
+                var nextYaw = Mathf.LerpAngle(transform.eulerAngles.y, authoritativeYaw, Time.deltaTime * reconcileBlendSpeed);
+                transform.rotation = Quaternion.Euler(0f, nextYaw, 0f);
+            }
+        }
 
         public void Configure(Transform pivot, Camera localCamera, bool shouldLockCursor = true)
         {
@@ -149,6 +224,9 @@ namespace ShooterPrototype.Player
             {
                 horizontalSpeed = 0f;
                 moveInputMagnitude = 0f;
+                networkMoveInputX = 0f;
+                networkMoveInputZ = 0f;
+                networkJumpPressed = false;
                 return;
             }
 
@@ -263,18 +341,20 @@ namespace ShooterPrototype.Player
         private void TickMove()
         {
             UpdateCrouchState();
-            isSneaking = !isCrouching && ReadSneakPressed();
 
             var moveInput = ReadMoveInput();
             var inputX = moveInput.x;
             var inputZ = moveInput.y;
+            networkMoveInputX = inputX;
+            networkMoveInputZ = inputZ;
+            networkJumpPressed = false;
             moveInputMagnitude = Mathf.Clamp01(moveInput.magnitude);
+            isSprinting = !isCrouching &&
+                          ReadSprintPressed() &&
+                          moveInputMagnitude > 0.12f &&
+                          CanSprintOnMoveInput(inputZ);
 
-            var moveDirection = (transform.right * inputX + transform.forward * inputZ);
-            if (moveDirection.sqrMagnitude > 1f)
-            {
-                moveDirection.Normalize();
-            }
+            var moveDirection = BuildScaledMoveDirection(inputX, inputZ);
 
             isGrounded = EvaluateGrounded();
             if (isGrounded && verticalVelocity < 0f)
@@ -284,6 +364,7 @@ namespace ShooterPrototype.Player
 
             if (isGrounded && ReadJumpPressed())
             {
+                networkJumpPressed = true;
                 verticalVelocity = Mathf.Sqrt(jumpHeight * -2f * gravity);
                 audioController?.PlayJump(true);
             }
@@ -295,9 +376,9 @@ namespace ShooterPrototype.Player
             {
                 speedMultiplier = Mathf.Clamp(crouchSpeedMultiplier, 0.1f, 1f);
             }
-            else if (isSneaking)
+            else if (isSprinting)
             {
-                speedMultiplier = Mathf.Clamp(sneakSpeedMultiplier, 0.1f, 1f);
+                speedMultiplier = SprintSpeedMultiplier;
             }
             var velocity = moveDirection * (moveSpeed * speedMultiplier);
             velocity.y = verticalVelocity;
@@ -307,6 +388,30 @@ namespace ShooterPrototype.Player
             var ccVelocity = characterController.velocity;
             horizontalSpeed = new Vector2(ccVelocity.x, ccVelocity.z).magnitude;
             TryEmitFootstep();
+        }
+
+        private Vector3 BuildScaledMoveDirection(float inputX, float inputZ)
+        {
+            var mag = Mathf.Sqrt(inputX * inputX + inputZ * inputZ);
+            if (mag > 1f)
+            {
+                inputX /= mag;
+                inputZ /= mag;
+            }
+
+            inputX *= Mathf.Clamp(sideSpeedMultiplier, 0.1f, 1f);
+            if (inputZ < 0f)
+            {
+                inputZ *= Mathf.Clamp(backwardSpeedMultiplier, 0.1f, 1f);
+            }
+
+            var moveDirection = transform.right * inputX + transform.forward * inputZ;
+            if (moveDirection.sqrMagnitude > 1f)
+            {
+                moveDirection.Normalize();
+            }
+
+            return moveDirection;
         }
 
         public void PlayRemoteFootstep()
@@ -322,7 +427,7 @@ namespace ShooterPrototype.Player
         private void TryEmitFootstep()
         {
             // Crouch movement is intentionally silent.
-            if (isCrouching || isSneaking)
+            if (isCrouching)
             {
                 return;
             }
@@ -332,14 +437,17 @@ namespace ShooterPrototype.Player
                 return;
             }
 
+            var cadenceFast = isSprinting
+                ? Mathf.Max(0.06f, footstepIntervalSprint)
+                : Mathf.Max(0.08f, footstepIntervalFast);
             var cadence = Mathf.Lerp(
                 Mathf.Max(0.1f, footstepIntervalSlow),
-                Mathf.Max(0.08f, footstepIntervalFast),
-                Mathf.Clamp01(horizontalSpeed / Mathf.Max(0.01f, moveSpeed)));
+                cadenceFast,
+                Mathf.Clamp01(horizontalSpeed / Mathf.Max(0.01f, MaxHorizontalMoveSpeed)));
 
             nextFootstepAt = Time.time + cadence;
             footstepSequence++;
-            audioController?.PlayFootstep(true);
+            audioController?.PlayFootstep(true, isSprinting);
         }
 
         private void UpdateCrouchState()
@@ -528,7 +636,12 @@ namespace ShooterPrototype.Player
 #endif
         }
 
-        private static bool ReadSneakPressed()
+        private bool CanSprintOnMoveInput(float forwardInput)
+        {
+            return forwardInput > sprintMinForwardInput;
+        }
+
+        private static bool ReadSprintPressed()
         {
 #if ENABLE_INPUT_SYSTEM
             return Keyboard.current != null && Keyboard.current.leftShiftKey.isPressed;

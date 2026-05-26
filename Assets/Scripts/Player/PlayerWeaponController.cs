@@ -32,6 +32,7 @@ namespace ShooterPrototype.Player
         [Header("Wall Collision Fire Block")]
         [SerializeField] private bool blockFireWhenWeaponCollides = true;
         [SerializeField, Range(0f, 1f)] private float fireBlockWallAvoidThreshold = 0.3f;
+        [SerializeField] private bool blockFireWhenSprinting = true;
 
         [Header("Spray / Recoil")]
         [SerializeField] private float sprayResetDelay = 0.24f;
@@ -161,6 +162,11 @@ namespace ShooterPrototype.Player
             }
 
             if (ShouldBlockFireByWallCollision())
+            {
+                return;
+            }
+
+            if (ShouldBlockFireBySprint())
             {
                 return;
             }
@@ -391,7 +397,7 @@ namespace ShooterPrototype.Player
                         TryPlayHeadshotAudio(hitZone);
                         if (notifyNetworkHit)
                         {
-                            TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone);
+                            TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone, hit.point);
                         }
                     }
                 }
@@ -407,7 +413,7 @@ namespace ShooterPrototype.Player
                     TryPlayHeadshotAudio(hitZone);
                     if (notifyNetworkHit)
                     {
-                        TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone);
+                        TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone, hit.point);
                     }
                 }
             }
@@ -578,7 +584,11 @@ namespace ShooterPrototype.Player
             Head = 3
         }
 
-        private void TrySendPlayerHitToServer(Collider targetCollider, Vector3 shotDirection, HitZone hitZone)
+        private void TrySendPlayerHitToServer(
+            Collider targetCollider,
+            Vector3 shotDirection,
+            HitZone hitZone,
+            Vector3 hitPoint)
         {
             if (targetCollider == null)
             {
@@ -596,7 +606,15 @@ namespace ShooterPrototype.Player
                 realtimeClient = FindObjectOfType<RealtimeTransportClient>();
             }
 
-            realtimeClient?.SendHit(identity.TicketId, ResolveDamage(hitZone), shotDirection);
+            var shotTick = realtimeClient != null ? realtimeClient.LatestServerTick : 0;
+            realtimeClient?.SendHit(
+                identity.TicketId,
+                ResolveDamage(hitZone),
+                shotDirection,
+                shotSequence,
+                shotTick,
+                hitPoint,
+                hitZone.ToString().ToLowerInvariant());
         }
 
         private void SpawnVfx(GameObject prefab, Vector3 position, Quaternion rotation)
@@ -639,6 +657,21 @@ namespace ShooterPrototype.Player
             }
 
             return weaponMount.CurrentWallAvoidBlend >= Mathf.Clamp01(fireBlockWallAvoidThreshold);
+        }
+
+        private bool ShouldBlockFireBySprint()
+        {
+            if (!blockFireWhenSprinting)
+            {
+                return false;
+            }
+
+            if (fpsController == null)
+            {
+                fpsController = GetComponent<FpsCharacterController>();
+            }
+
+            return fpsController != null && fpsController.IsSprinting;
         }
 
         private IEnumerator ReloadRoutine()

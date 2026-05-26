@@ -1,4 +1,7 @@
+using ShooterPrototype.Player;
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -9,6 +12,19 @@ namespace ShooterPrototype.Network
 {
     public sealed class RealtimeTransportClient : MonoBehaviour
     {
+        [Serializable]
+        public sealed class RealtimeStateSample
+        {
+            public int sampleTick;
+            public float x;
+            public float y;
+            public float z;
+            public float yaw;
+            public float velX;
+            public float velY;
+            public float velZ;
+        }
+
         [Serializable]
         public sealed class RealtimePlayerState
         {
@@ -21,6 +37,7 @@ namespace ShooterPrototype.Network
             public int hitPlayerSeq;
             public int footstepSeq;
             public bool isCrouching;
+            public bool isSprinting;
             public float wallAvoidBlend;
             public bool isDead;
             public int deathSeq;
@@ -32,8 +49,12 @@ namespace ShooterPrototype.Network
             public bool isGrounded;
             public int jumpState;
             public float animPhase;
+            public float velX;
+            public float velY;
+            public float velZ;
             public int sampleTick;
             public long sampleTimeMs;
+            public RealtimeStateSample[] history;
         }
 
         [Serializable]
@@ -43,6 +64,15 @@ namespace ShooterPrototype.Network
             public int serverTick;
             public int serverTickRate;
             public RealtimePlayerState[] players;
+            public SelfAuthoritativePose selfAuthoritative;
+        }
+
+        [Serializable]
+        public sealed class SelfAuthoritativePose
+        {
+            public PositionDto position;
+            public float yaw;
+            public int sampleTick;
         }
 
         [Serializable]
@@ -76,6 +106,12 @@ namespace ShooterPrototype.Network
             public float dirX;
             public float dirY;
             public float dirZ;
+            public int shotSeq;
+            public int shotTick;
+            public float hitX;
+            public float hitY;
+            public float hitZ;
+            public string hitZone;
         }
 
         [Serializable]
@@ -102,6 +138,7 @@ namespace ShooterPrototype.Network
             public int hitPlayerSeq;
             public int footstepSeq;
             public bool isCrouching;
+            public bool isSprinting;
             public float wallAvoidBlend;
             public bool isDead;
             public int deathSeq;
@@ -114,6 +151,24 @@ namespace ShooterPrototype.Network
             public int jumpState;
             public float animPhase;
             public int poseSeq;
+            public float moveInputX;
+            public float moveInputZ;
+            public bool jumpPressed;
+            public bool inputAuth;
+        }
+
+        [Serializable]
+        private sealed class PingMessage
+        {
+            public string type;
+            public long clientTimeMs;
+        }
+
+        [Serializable]
+        private sealed class PongMessage
+        {
+            public string type;
+            public long clientTimeMs;
         }
 
         [SerializeField] private string websocketUrl = "ws://127.0.0.1:5051";
@@ -134,11 +189,19 @@ namespace ShooterPrototype.Network
         private readonly object snapshotLock = new object();
         private RealtimeSnapshot latestSnapshot;
         private bool hasLatestSnapshot;
+        private float lastPingSentUnscaledTime = -10f;
+        private int smoothedRoundTripMs = -1;
+        private float lastSnapshotReceivedUnscaledTime;
+        private Coroutine pingCoroutine;
 
         public bool IsConnected => socket != null && socket.State == WebSocketState.Open;
         public bool IsConnecting => isConnecting;
         public bool IsReady => IsConnected && hasJoinAck;
         public string ConnectedTicketId => connectedTicketId;
+        public int SmoothedRoundTripMs => smoothedRoundTripMs;
+        public float LastSnapshotReceivedUnscaledTime => lastSnapshotReceivedUnscaledTime;
+        public int LatestServerTick { get; private set; }
+        public int LatestServerTickRate { get; private set; } = 128;
         public event Action<DamageMessage> DamageReceived;
 
         public void Configure(string wsUrl)
@@ -188,6 +251,7 @@ namespace ShooterPrototype.Network
             int hitPlayerSeq = 0,
             int footstepSeq = 0,
             bool isCrouching = false,
+            bool isSprinting = false,
             float wallAvoidBlend = 0f,
             bool isDead = false,
             int deathSeq = 0,
@@ -196,7 +260,11 @@ namespace ShooterPrototype.Network
             float animSpeed = 0f,
             bool isGrounded = true,
             int jumpState = 0,
-            float animPhase = 0f)
+            float animPhase = 0f,
+            float moveInputX = 0f,
+            float moveInputZ = 0f,
+            bool jumpPressed = false,
+            bool inputAuth = false)
         {
             if (!IsConnected)
             {
@@ -219,17 +287,22 @@ namespace ShooterPrototype.Network
                 hitPlayerSeq = Math.Max(0, hitPlayerSeq),
                 footstepSeq = Math.Max(0, footstepSeq),
                 isCrouching = isCrouching,
+                isSprinting = isSprinting,
                 wallAvoidBlend = Mathf.Clamp01(wallAvoidBlend),
                 isDead = isDead,
                 deathSeq = Math.Max(0, deathSeq),
                 deathFallDirX = deathFallDirection.x,
                 deathFallDirY = deathFallDirection.y,
                 deathFallDirZ = deathFallDirection.z,
-                animSpeed = Mathf.Clamp01(animSpeed),
+                animSpeed = Mathf.Clamp(animSpeed, 0f, ProceduralLocomotionRig.MaxNetworkAnimSpeed01),
                 isAiming = isAiming,
                 isGrounded = isGrounded,
                 jumpState = Mathf.Clamp(jumpState, 0, 2),
                 animPhase = Mathf.Repeat(animPhase, 1f),
+                moveInputX = Mathf.Clamp(moveInputX, -1f, 1f),
+                moveInputZ = Mathf.Clamp(moveInputZ, -1f, 1f),
+                jumpPressed = jumpPressed,
+                inputAuth = inputAuth,
                 poseSeq = ++nextPoseSeq
             };
             hasPendingPose = true;
@@ -254,14 +327,102 @@ namespace ShooterPrototype.Network
             }
         }
 
-        public void SendHit(string targetTicketId, float damage, Vector3 hitDirection)
+        public void TickNetworkMeasurement(float intervalSeconds = 1f)
+        {
+            if (!IsReady || socket == null || sendSemaphore == null)
+            {
+                return;
+            }
+
+            if (Time.unscaledTime - lastPingSentUnscaledTime < Mathf.Max(0.25f, intervalSeconds))
+            {
+                return;
+            }
+
+            lastPingSentUnscaledTime = Time.unscaledTime;
+            _ = SendPingAsync(cts != null ? cts.Token : CancellationToken.None);
+        }
+
+        private void OnEnable()
+        {
+            if (pingCoroutine == null)
+            {
+                pingCoroutine = StartCoroutine(PingLoop());
+            }
+        }
+
+        private void OnDisable()
+        {
+            if (pingCoroutine != null)
+            {
+                StopCoroutine(pingCoroutine);
+                pingCoroutine = null;
+            }
+        }
+
+        private IEnumerator PingLoop()
+        {
+            var wait = new WaitForSecondsRealtime(1f);
+            while (true)
+            {
+                yield return wait;
+                TickNetworkMeasurement(1f);
+            }
+        }
+
+        private async Task SendPingAsync(CancellationToken token)
+        {
+            if (!IsReady || socket == null || sendSemaphore == null)
+            {
+                return;
+            }
+
+            await sendSemaphore.WaitAsync(token);
+            try
+            {
+                if (socket == null || socket.State != WebSocketState.Open)
+                {
+                    return;
+                }
+
+                var ping = new PingMessage
+                {
+                    type = "ping",
+                    clientTimeMs = (long)(Time.realtimeSinceStartupAsDouble * 1000.0)
+                };
+                var json = JsonUtility.ToJson(ping);
+                var bytes = Encoding.UTF8.GetBytes(json);
+                await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+            }
+            catch
+            {
+                if (Time.unscaledTime - lastSendErrorLogAt > 1f)
+                {
+                    lastSendErrorLogAt = Time.unscaledTime;
+                    Debug.LogWarning("[RealtimeTransportClient] Ping send failed");
+                }
+            }
+            finally
+            {
+                sendSemaphore.Release();
+            }
+        }
+
+        public void SendHit(
+            string targetTicketId,
+            float damage,
+            Vector3 shotDirection,
+            int shotSeq = 0,
+            int shotTick = 0,
+            Vector3 hitPoint = default,
+            string hitZone = "body")
         {
             if (!IsConnected || string.IsNullOrWhiteSpace(targetTicketId))
             {
                 return;
             }
 
-            var direction = hitDirection.sqrMagnitude > 0.0001f ? hitDirection.normalized : Vector3.forward;
+            var direction = shotDirection.sqrMagnitude > 0.0001f ? shotDirection.normalized : Vector3.forward;
             _ = SendJsonAsync(new HitMessage
             {
                 type = "hit",
@@ -269,7 +430,13 @@ namespace ShooterPrototype.Network
                 damage = Mathf.Max(0f, damage),
                 dirX = direction.x,
                 dirY = direction.y,
-                dirZ = direction.z
+                dirZ = direction.z,
+                shotSeq = Math.Max(0, shotSeq),
+                shotTick = Math.Max(0, shotTick),
+                hitX = hitPoint.x,
+                hitY = hitPoint.y,
+                hitZ = hitPoint.z,
+                hitZone = string.IsNullOrWhiteSpace(hitZone) ? "body" : hitZone.Trim().ToLowerInvariant()
             }, cts != null ? cts.Token : CancellationToken.None);
         }
 
@@ -316,9 +483,10 @@ namespace ShooterPrototype.Network
 
         private async Task ReceiveLoopAsync(ClientWebSocket ownerSocket, CancellationToken token)
         {
-            var buffer = new byte[4096];
+            var buffer = new byte[16384];
             var segment = new ArraySegment<byte>(buffer);
             var textBuilder = new StringBuilder(4096);
+            var binaryBuilder = new List<byte>(8192);
 
             while (!token.IsCancellationRequested && ownerSocket != null && ownerSocket.State == WebSocketState.Open)
             {
@@ -335,6 +503,23 @@ namespace ShooterPrototype.Network
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     break;
+                }
+
+                if (result.MessageType == WebSocketMessageType.Binary)
+                {
+                    for (var i = 0; i < result.Count; i++)
+                    {
+                        binaryBuilder.Add(buffer[i]);
+                    }
+
+                    if (!result.EndOfMessage)
+                    {
+                        continue;
+                    }
+
+                    TryHandleIncomingBinary(binaryBuilder.ToArray());
+                    binaryBuilder.Clear();
+                    continue;
                 }
 
                 var chunk = Encoding.UTF8.GetString(buffer, 0, result.Count);
@@ -393,6 +578,37 @@ namespace ShooterPrototype.Network
                     return;
                 }
 
+                PongMessage pongMessage = null;
+                try
+                {
+                    pongMessage = JsonUtility.FromJson<PongMessage>(json);
+                }
+                catch
+                {
+                    // ignored
+                }
+
+                if (pongMessage != null && string.Equals(pongMessage.type, "pong", StringComparison.Ordinal))
+                {
+                    var nowMs = (long)(Time.realtimeSinceStartupAsDouble * 1000.0);
+                    var rttMs = (int)Mathf.Max(1f, nowMs - pongMessage.clientTimeMs);
+                    if (ShouldRejectPingSample(rttMs))
+                    {
+                        return;
+                    }
+
+                    if (smoothedRoundTripMs <= 0)
+                    {
+                        smoothedRoundTripMs = rttMs;
+                    }
+                    else
+                    {
+                        smoothedRoundTripMs = Mathf.RoundToInt(Mathf.Lerp(smoothedRoundTripMs, rttMs, 0.25f));
+                    }
+
+                    return;
+                }
+
                 var joined = JsonUtility.FromJson<JoinedMessage>(json);
                 if (joined != null &&
                     string.Equals(joined.type, "joined", StringComparison.Ordinal) &&
@@ -404,11 +620,61 @@ namespace ShooterPrototype.Network
                 return;
             }
 
+            ApplyIncomingSnapshot(snapshot);
+        }
+
+        private void TryHandleIncomingBinary(byte[] data)
+        {
+            if (data == null || data.Length == 0)
+            {
+                return;
+            }
+
+            if (!RealtimeSnapshotBinaryCodec.TryDecode(data, out var snapshot))
+            {
+                return;
+            }
+
+            ApplyIncomingSnapshot(snapshot);
+        }
+
+        private void ApplyIncomingSnapshot(RealtimeSnapshot snapshot)
+        {
+            if (snapshot == null || !string.Equals(snapshot.type, "snapshot", StringComparison.Ordinal))
+            {
+                return;
+            }
+
             lock (snapshotLock)
             {
                 latestSnapshot = snapshot;
                 hasLatestSnapshot = true;
+                lastSnapshotReceivedUnscaledTime = Time.unscaledTime;
+                if (snapshot.serverTick > 0)
+                {
+                    LatestServerTick = snapshot.serverTick;
+                }
+
+                if (snapshot.serverTickRate > 0)
+                {
+                    LatestServerTickRate = snapshot.serverTickRate;
+                }
             }
+        }
+
+        private bool ShouldRejectPingSample(int rttMs)
+        {
+            if (smoothedRoundTripMs <= 0)
+            {
+                return rttMs > 750;
+            }
+
+            if (rttMs <= smoothedRoundTripMs * 3)
+            {
+                return false;
+            }
+
+            return rttMs > Mathf.Max(120, smoothedRoundTripMs * 2);
         }
 
         private async Task SendJsonAsync(object payload, CancellationToken token)
@@ -526,6 +792,7 @@ namespace ShooterPrototype.Network
             {
                 latestSnapshot = null;
                 hasLatestSnapshot = false;
+                lastSnapshotReceivedUnscaledTime = 0f;
             }
 
             localCts?.Dispose();

@@ -4,6 +4,8 @@ namespace ShooterPrototype.Player
 {
     public sealed class ProceduralLocomotionRig : MonoBehaviour
     {
+        public const float MaxNetworkAnimSpeed01 = 1.25f;
+
         [Header("References")]
         [SerializeField] private FpsCharacterController fpsController;
         [SerializeField] private Transform rootTransform;
@@ -22,6 +24,8 @@ namespace ShooterPrototype.Player
 
         [Header("Walk")]
         [SerializeField] private float walkCycleSpeed = 2.8f;
+        [SerializeField] private float sprintCycleSpeedMultiplier = 1.45f;
+        [SerializeField] private float sprintAnimSpeed01 = 1.15f;
         [SerializeField] private float remoteIdleDeadzone = 0.025f;
         [SerializeField] private float localSpeedSmoothTime = 0.09f;
         [SerializeField] private float footStepLength = 0.2f;
@@ -38,6 +42,17 @@ namespace ShooterPrototype.Player
         [SerializeField] private float landBobKick = 0.05f;
         [SerializeField] private float landBobRecover = 10f;
         [SerializeField] private float remoteGroundedSwitchDelay = 0.1f;
+
+        [Header("Remote locomotion")]
+        [SerializeField] private float remoteWalkCycleSpeedMultiplier = 1.22f;
+        [SerializeField] private float remoteSprintCycleSpeedMultiplier = 1.55f;
+        [SerializeField] private float remoteSprintAnimSpeedBoost = 1.12f;
+        [SerializeField] private float remoteWalkPhaseSyncRate = 9f;
+        [SerializeField] private float remoteSprintPhaseSyncRate = 24f;
+        [SerializeField] private float remoteSprintFootSmoothTime = 0.026f;
+        [SerializeField] private float remoteHorizontalSpeedReference = 8.5f;
+        [SerializeField] private bool useVelocityDrivenNetworkLocomotion = true;
+        [SerializeField] private float remoteVelocitySpeedSmooth = 14f;
 
         [Header("Leg curve")]
         [SerializeField] private float legBendForward = 0.05f;
@@ -79,6 +94,9 @@ namespace ShooterPrototype.Player
         private int networkJumpState;
         private float networkAnimPhase01;
         private bool networkCrouching;
+        private bool networkSprinting;
+        private Vector3 networkWorldVelocity;
+        private bool hasNetworkWorldVelocity;
         private float crouchBlend;
         private float crouchBlendVelocity;
         private float currentSpeed01;
@@ -99,6 +117,16 @@ namespace ShooterPrototype.Player
         public float CurrentSpeed01 => currentSpeed01;
         public bool CurrentGrounded => currentGrounded;
         public int CurrentJumpState => currentJumpState;
+
+        public float GetNetworkAnimSpeed01()
+        {
+            if (useNetworkState)
+            {
+                return networkSpeed01;
+            }
+
+            return ComputeLocalAnimSpeed01();
+        }
 
         private void Awake()
         {
@@ -175,10 +203,56 @@ namespace ShooterPrototype.Player
             useNetworkState = enabled;
         }
 
-        public void SetNetworkAnimationState(float speed01, bool grounded, int jumpState, float animPhase01, bool isCrouching = false)
+        public void SetNetworkAnimationState(
+            float speed01,
+            bool grounded,
+            int jumpState,
+            float animPhase01,
+            bool isCrouching = false,
+            bool isSprinting = false)
         {
             useNetworkState = true;
-            networkSpeed01 = Mathf.Clamp01(speed01);
+            if (isSprinting && speed01 > remoteIdleDeadzone && speed01 <= 1.01f)
+            {
+                speed01 = Mathf.Min(MaxNetworkAnimSpeed01, speed01 * sprintAnimSpeed01);
+            }
+
+            networkSpeed01 = Mathf.Clamp(speed01, 0f, MaxNetworkAnimSpeed01);
+            networkAnimPhase01 = Mathf.Repeat(animPhase01, 1f);
+            SetNetworkDiscreteState(grounded, jumpState, isCrouching, isSprinting);
+        }
+
+        public void SetNetworkDiscreteState(
+            bool grounded,
+            int jumpState,
+            bool isCrouching,
+            bool isSprinting)
+        {
+            useNetworkState = true;
+            ApplyNetworkGrounded(grounded);
+            networkJumpState = Mathf.Clamp(jumpState, 0, 2);
+            networkCrouching = isCrouching;
+            networkSprinting = isSprinting;
+        }
+
+        public void DriveNetworkLocomotionFromVelocity(
+            Vector3 worldVelocity,
+            bool grounded,
+            int jumpState,
+            bool isCrouching,
+            bool isSprinting)
+        {
+            useNetworkState = true;
+            hasNetworkWorldVelocity = true;
+            networkWorldVelocity = worldVelocity;
+            ApplyNetworkGrounded(grounded);
+            networkJumpState = Mathf.Clamp(jumpState, 0, 2);
+            networkCrouching = isCrouching;
+            networkSprinting = isSprinting;
+        }
+
+        private void ApplyNetworkGrounded(bool grounded)
+        {
             if (grounded != networkGrounded)
             {
                 if (pendingNetworkGrounded != grounded)
@@ -196,9 +270,6 @@ namespace ShooterPrototype.Player
             {
                 pendingNetworkGroundedSince = -1f;
             }
-            networkJumpState = Mathf.Clamp(jumpState, 0, 2);
-            networkAnimPhase01 = Mathf.Repeat(animPhase01, 1f);
-            networkCrouching = isCrouching;
         }
 
         private void LateUpdate()
@@ -217,8 +288,26 @@ namespace ShooterPrototype.Player
             var dt = Mathf.Max(0.0001f, Time.deltaTime);
             var grounded = useNetworkState ? networkGrounded : IsGrounded();
             var localInputSpeed01 = fpsController != null
-                ? Mathf.Clamp01(fpsController.MoveInputMagnitude)
+                ? ComputeLocalAnimSpeed01()
                 : Mathf.Clamp01(GetHorizontalSpeed() / 5.5f);
+
+            if (useNetworkState && useVelocityDrivenNetworkLocomotion && hasNetworkWorldVelocity)
+            {
+                var horizontalSpeed = new Vector3(networkWorldVelocity.x, 0f, networkWorldVelocity.z).magnitude;
+                var targetSpeed01 = Mathf.Clamp01(horizontalSpeed / Mathf.Max(0.01f, remoteHorizontalSpeedReference));
+                if (networkSprinting && targetSpeed01 > remoteIdleDeadzone)
+                {
+                    targetSpeed01 = Mathf.Min(
+                        MaxNetworkAnimSpeed01,
+                        targetSpeed01 * remoteSprintAnimSpeedBoost);
+                }
+
+                networkSpeed01 = Mathf.Lerp(
+                    networkSpeed01,
+                    targetSpeed01,
+                    Mathf.Clamp01(dt * remoteVelocitySpeedSmooth));
+            }
+
             var rawSpeed01 = useNetworkState
                 ? Mathf.Lerp(currentSpeed01, networkSpeed01, Mathf.Clamp01(dt * 14f))
                 : localInputSpeed01;
@@ -232,8 +321,27 @@ namespace ShooterPrototype.Player
                     Mathf.Infinity,
                     dt);
             var motionSpeed01 = (useNetworkState && speed01 < Mathf.Max(0f, remoteIdleDeadzone)) ? 0f : speed01;
+            if (useNetworkState &&
+                motionSpeed01 > remoteIdleDeadzone &&
+                !(useVelocityDrivenNetworkLocomotion && hasNetworkWorldVelocity))
+            {
+                var velocitySpeed01 = Mathf.Clamp01(
+                    GetHorizontalSpeed() / Mathf.Max(0.01f, remoteHorizontalSpeedReference));
+                motionSpeed01 = Mathf.Max(motionSpeed01, velocitySpeed01);
+                if (networkSprinting)
+                {
+                    motionSpeed01 = Mathf.Min(
+                        MaxNetworkAnimSpeed01,
+                        motionSpeed01 * remoteSprintAnimSpeedBoost);
+                }
+            }
+
+            hasNetworkWorldVelocity = false;
+
             var smoothTime = useNetworkState
-                ? Mathf.Max(0.01f, targetSmoothTime * 1.8f)
+                ? (networkSprinting && motionSpeed01 > remoteIdleDeadzone
+                    ? Mathf.Max(0.01f, remoteSprintFootSmoothTime)
+                    : Mathf.Max(0.01f, targetSmoothTime * 1.8f))
                 : targetSmoothTime;
 
             if (!grounded && wasGroundedLastFrame)
@@ -255,14 +363,47 @@ namespace ShooterPrototype.Player
             // to network phase to prevent visible jitter from packet timing variance.
             // For remote avatars we don't force idle phase progression.
             var phaseMin = useNetworkState ? 0f : 0.2f;
-            walkPhase += dt * walkCycleSpeed * Mathf.Lerp(phaseMin, 1.8f, motionSpeed01);
+            var cycleMultiplier = 1f;
+            if (useNetworkState ? networkSprinting : (fpsController != null && fpsController.IsSprinting))
+            {
+                cycleMultiplier = Mathf.Max(1f, sprintCycleSpeedMultiplier);
+            }
+
             if (useNetworkState)
+            {
+                cycleMultiplier *= Mathf.Max(1f, remoteWalkCycleSpeedMultiplier);
+                if (networkSprinting)
+                {
+                    cycleMultiplier *= Mathf.Max(1f, remoteSprintCycleSpeedMultiplier);
+                }
+            }
+
+            if (useNetworkState && useVelocityDrivenNetworkLocomotion)
+            {
+                walkPhase += dt * walkCycleSpeed * cycleMultiplier * Mathf.Lerp(phaseMin, 1.8f, motionSpeed01);
+            }
+            else if (useNetworkState && motionSpeed01 > remoteIdleDeadzone)
             {
                 var currentDeg = walkPhase * Mathf.Rad2Deg;
                 var targetDeg = networkAnimPhase01 * 360f;
-                var deltaDeg = Mathf.DeltaAngle(currentDeg, targetDeg);
-                var correctionDeg = Mathf.Clamp(deltaDeg, -8f, 8f) * Mathf.Clamp01(dt * 3f);
-                walkPhase += correctionDeg * Mathf.Deg2Rad;
+                var syncRate = networkSprinting ? remoteSprintPhaseSyncRate : remoteWalkPhaseSyncRate;
+                if (networkSprinting)
+                {
+                    walkPhase = (currentDeg + Mathf.DeltaAngle(currentDeg, targetDeg) * Mathf.Clamp01(dt * syncRate)) *
+                                Mathf.Deg2Rad;
+                    walkPhase += dt * walkCycleSpeed * cycleMultiplier * motionSpeed01 * 0.12f;
+                }
+                else
+                {
+                    walkPhase += dt * walkCycleSpeed * cycleMultiplier * Mathf.Lerp(phaseMin, 1.8f, motionSpeed01);
+                    var deltaDeg = Mathf.DeltaAngle(currentDeg, targetDeg);
+                    var correctionDeg = Mathf.Clamp(deltaDeg, -10f, 10f) * Mathf.Clamp01(dt * syncRate);
+                    walkPhase += correctionDeg * Mathf.Deg2Rad;
+                }
+            }
+            else
+            {
+                walkPhase += dt * walkCycleSpeed * cycleMultiplier * Mathf.Lerp(phaseMin, 1.8f, motionSpeed01);
             }
             var bob = Mathf.Sin(walkPhase * 2f) * bodyBobHeight * motionSpeed01 * (1f - airborneBlend);
 
@@ -434,6 +575,31 @@ namespace ShooterPrototype.Player
             }
 
             return Physics.Raycast(rootTransform.position + Vector3.up * 0.05f, Vector3.down, 0.2f);
+        }
+
+        private float ComputeLocalAnimSpeed01()
+        {
+            if (fpsController == null)
+            {
+                return 0f;
+            }
+
+            if (fpsController.MoveInputMagnitude < 0.12f)
+            {
+                return 0f;
+            }
+
+            if (fpsController.IsSprinting)
+            {
+                var sprintReference = Mathf.Max(0.01f, fpsController.MaxHorizontalMoveSpeed);
+                return Mathf.Clamp(
+                    Mathf.Max(fpsController.MoveInputMagnitude, fpsController.HorizontalSpeed / sprintReference) *
+                    sprintAnimSpeed01,
+                    0f,
+                    MaxNetworkAnimSpeed01);
+            }
+
+            return Mathf.Clamp01(fpsController.MoveInputMagnitude);
         }
 
         private float GetHorizontalSpeed()

@@ -1,4 +1,5 @@
 using System.Collections;
+using ShooterPrototype.Bootstrap;
 using ShooterPrototype.Matchmaking;
 using ShooterPrototype.Network;
 using UnityEngine;
@@ -18,6 +19,7 @@ namespace ShooterPrototype.UI
 
         private NetworkLauncher networkLauncher;
         private QueueApiClient queueApiClient;
+        private PerformancePresetController performancePreset;
         private string mainMenuSceneName = "MainMenu";
 
         private Canvas canvas;
@@ -29,18 +31,27 @@ namespace ShooterPrototype.UI
         private Text healthText;
         private Button backButton;
         private Button muteButton;
+        private Button perfButton;
         private Text muteButtonLabel;
+        private Text perfButtonLabel;
+        private Image perfButtonImage;
         private Coroutine pingRefreshCoroutine;
         private float fpsSmoothed;
         private int consecutivePingFailures;
         private bool returnToMenuRequested;
         private bool isMuted;
 
-        public void Initialize(NetworkLauncher launcher, string menuSceneName)
+        public void Initialize(NetworkLauncher launcher, string menuSceneName, PerformancePresetController presetController = null)
         {
             networkLauncher = launcher;
+            performancePreset = presetController;
             mainMenuSceneName = string.IsNullOrWhiteSpace(menuSceneName) ? "MainMenu" : menuSceneName;
             queueApiClient = FindObjectOfType<QueueApiClient>();
+
+            if (performancePreset == null)
+            {
+                performancePreset = FindObjectOfType<PerformancePresetController>();
+            }
 
             if (networkLauncher != null)
             {
@@ -50,6 +61,7 @@ namespace ShooterPrototype.UI
 
             EnsureHudExists();
             LoadMuteState();
+            RefreshPerfButtonVisuals();
             RefreshConnectionText();
             SetActiveForScene(false);
         }
@@ -122,6 +134,22 @@ namespace ShooterPrototype.UI
             ApplyMuteState();
         }
 
+        private void HandlePerfPressed()
+        {
+            if (performancePreset == null)
+            {
+                performancePreset = FindObjectOfType<PerformancePresetController>();
+            }
+
+            if (performancePreset == null)
+            {
+                return;
+            }
+
+            performancePreset.ToggleMaxPerformance();
+            RefreshPerfButtonVisuals();
+        }
+
         private void LoadMuteState()
         {
             isMuted = PlayerPrefs.GetInt(MutePrefKey, 0) == 1;
@@ -136,32 +164,33 @@ namespace ShooterPrototype.UI
 
         private void EnsureHudExists()
         {
-            if (canvas != null)
-            {
-                return;
-            }
-
-            var existingCanvas = transform.Find(CanvasObjectName);
-            if (existingCanvas != null)
-            {
-                canvas = existingCanvas.GetComponent<Canvas>();
-            }
-
             if (canvas == null)
             {
-                var canvasObject = new GameObject(CanvasObjectName);
-                canvasObject.transform.SetParent(transform, false);
+                var existingCanvas = transform.Find(CanvasObjectName);
+                if (existingCanvas != null)
+                {
+                    canvas = existingCanvas.GetComponent<Canvas>();
+                }
 
-                canvas = canvasObject.AddComponent<Canvas>();
-                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-                canvas.sortingOrder = 500;
+                if (canvas == null)
+                {
+                    var canvasObject = new GameObject(CanvasObjectName);
+                    canvasObject.transform.SetParent(transform, false);
 
-                canvasObject.AddComponent<CanvasScaler>();
-                canvasObject.AddComponent<GraphicRaycaster>();
+                    canvas = canvasObject.AddComponent<Canvas>();
+                    canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                    canvas.sortingOrder = 500;
+
+                    canvasObject.AddComponent<CanvasScaler>();
+                    canvasObject.AddComponent<GraphicRaycaster>();
+                }
+
+                EnsureEventSystemExists();
+                BuildHudLayout(canvas.gameObject);
             }
 
             EnsureEventSystemExists();
-            BuildHudLayout(canvas.gameObject);
+            EnsurePerformancePresetButton();
         }
 
         private void BuildHudLayout(GameObject rootCanvasObject)
@@ -249,6 +278,44 @@ namespace ShooterPrototype.UI
             RefreshMuteButtonText();
         }
 
+        private void EnsurePerformancePresetButton()
+        {
+            if (perfButton != null || canvas == null)
+            {
+                return;
+            }
+
+            var topBar = canvas.transform.Find("TopBar");
+            if (topBar == null)
+            {
+                return;
+            }
+
+            var perfObject = new GameObject("PerfButton");
+            perfObject.transform.SetParent(topBar, false);
+
+            var perfRect = perfObject.AddComponent<RectTransform>();
+            perfRect.anchorMin = new Vector2(1f, 0.5f);
+            perfRect.anchorMax = new Vector2(1f, 0.5f);
+            perfRect.pivot = new Vector2(1f, 0.5f);
+            perfRect.sizeDelta = new Vector2(170f, 36f);
+            perfRect.anchoredPosition = new Vector2(-370f, 0f);
+
+            perfButtonImage = perfObject.AddComponent<Image>();
+            perfButtonImage.color = new Color(0.15f, 0.15f, 0.15f, 0.95f);
+
+            perfButton = perfObject.AddComponent<Button>();
+            perfButton.onClick.AddListener(HandlePerfPressed);
+            perfButtonLabel = CreateLabel(perfObject.transform, "Label", Vector2.zero, "");
+            var perfLabelRect = perfButtonLabel.rectTransform;
+            perfLabelRect.anchorMin = Vector2.zero;
+            perfLabelRect.anchorMax = Vector2.one;
+            perfLabelRect.offsetMin = Vector2.zero;
+            perfLabelRect.offsetMax = Vector2.zero;
+            perfButtonLabel.alignment = TextAnchor.MiddleCenter;
+            RefreshPerfButtonVisuals();
+        }
+
         private Text CreateLabel(Transform parent, string objectName, Vector2 anchoredPosition, string textValue)
         {
             var labelObject = new GameObject(objectName);
@@ -322,28 +389,41 @@ namespace ShooterPrototype.UI
         {
             while (true)
             {
+                var realtimeClient = FindObjectOfType<RealtimeTransportClient>();
+                var wsPing = realtimeClient != null && realtimeClient.IsReady
+                    ? realtimeClient.SmoothedRoundTripMs
+                    : -1;
+
+                if (pingText != null)
+                {
+                    if (wsPing > 0)
+                    {
+                        pingText.text = $"Ping: {wsPing} ms";
+                    }
+                    else if (networkLauncher != null && networkLauncher.LastMeasuredPingMs > 0)
+                    {
+                        pingText.text = $"Ping: {networkLauncher.LastMeasuredPingMs} ms (tcp)";
+                    }
+                    else
+                    {
+                        pingText.text = "Ping: -- ms";
+                    }
+                }
+
                 if (networkLauncher != null && networkLauncher.IsClientConnected)
                 {
-                    var pingTask = networkLauncher.MeasureCurrentServerPingMsAsync(1000);
-                    while (!pingTask.IsCompleted)
-                    {
-                        yield return null;
-                    }
-
-                    var ping = pingTask.IsCompletedSuccessfully ? pingTask.Result : -1;
-                    if (pingText != null)
-                    {
-                        pingText.text = ping > 0 ? $"Ping: {ping} ms" : "Ping: -- ms";
-                    }
-
-                    if (ping > 0)
+                    var snapshotFresh = realtimeClient != null &&
+                                          realtimeClient.IsReady &&
+                                          realtimeClient.LastSnapshotReceivedUnscaledTime > 0f &&
+                                          (Time.unscaledTime - realtimeClient.LastSnapshotReceivedUnscaledTime) < 2f;
+                    if (wsPing > 0 || snapshotFresh)
                     {
                         consecutivePingFailures = 0;
                     }
                     else
                     {
                         consecutivePingFailures++;
-                        if (!returnToMenuRequested && consecutivePingFailures >= 4)
+                        if (!returnToMenuRequested && consecutivePingFailures >= 8)
                         {
                             returnToMenuRequested = true;
                             networkLauncher.DisconnectClient("Lost connection to dedicated server.");
@@ -362,7 +442,7 @@ namespace ShooterPrototype.UI
 
                 RefreshFpsText();
 
-                yield return new WaitForSecondsRealtime(0.5f);
+                yield return new WaitForSecondsRealtime(1f);
             }
         }
 
@@ -481,6 +561,24 @@ namespace ShooterPrototype.UI
             }
 
             muteButtonLabel.text = isMuted ? "Sound: OFF" : "Sound: ON";
+        }
+
+        private void RefreshPerfButtonVisuals()
+        {
+            if (perfButtonLabel == null)
+            {
+                return;
+            }
+
+            var maxPerformance = performancePreset != null && performancePreset.MaxPerformanceEnabled;
+            perfButtonLabel.text = maxPerformance ? "Perf: MAX" : "Perf: QUALITY";
+
+            if (perfButtonImage != null)
+            {
+                perfButtonImage.color = maxPerformance
+                    ? new Color(0.12f, 0.34f, 0.16f, 0.95f)
+                    : new Color(0.15f, 0.15f, 0.15f, 0.95f);
+            }
         }
 
         private static void EnsureEventSystemExists()

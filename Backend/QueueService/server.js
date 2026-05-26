@@ -14,9 +14,35 @@ const MATCH_BATCH_WINDOW_SECONDS = Math.max(0, toInt(process.env.MATCH_BATCH_WIN
 const PRESENCE_TIMEOUT_SECONDS = Math.max(2, toInt(process.env.PRESENCE_TIMEOUT_SECONDS, 5));
 const MATCH_CONNECT_GRACE_SECONDS = Math.max(5, toInt(process.env.MATCH_CONNECT_GRACE_SECONDS, 45));
 const QUEUED_TICKET_TTL_SECONDS = Math.max(5, toInt(process.env.QUEUED_TICKET_TTL_SECONDS, Math.max(MATCH_TIMEOUT_SECONDS, 20)));
-const SERVER_TICK_RATE = Math.max(10, toInt(process.env.SERVER_TICK_RATE, 120));
+const SERVER_TICK_RATE = Math.max(10, toInt(process.env.SERVER_TICK_RATE, 128));
 const REALTIME_WS_PORT = toInt(process.env.REALTIME_WS_PORT, 5051);
 const DEBUG_REALTIME = (process.env.DEBUG_REALTIME || "1") !== "0";
+const POSE_HISTORY_KEEP_MS = Math.max(200, toInt(process.env.POSE_HISTORY_KEEP_MS, 500));
+const SNAPSHOT_HISTORY_SAMPLES = Math.max(4, toInt(process.env.SNAPSHOT_HISTORY_SAMPLES, 16));
+const USE_BINARY_SNAPSHOTS = (process.env.USE_BINARY_SNAPSHOTS || "1") !== "0";
+const MAX_PLAYER_SPEED = Number.isFinite(Number(process.env.MAX_PLAYER_SPEED))
+  ? Math.max(4, Number(process.env.MAX_PLAYER_SPEED))
+  : 12.5;
+const PLAYER_MOVE_SPEED = 5.5;
+const PLAYER_SPRINT_MULTIPLIER = 1.55;
+const PLAYER_CROUCH_MULTIPLIER = 0.55;
+const PLAYER_GRAVITY = -24;
+const PLAYER_JUMP_HEIGHT = 1.25;
+const PLAYER_SPRINT_MIN_FORWARD = 0.1;
+const PLAYER_SIDE_SPEED_MULTIPLIER = 0.85;
+const PLAYER_BACKWARD_SPEED_MULTIPLIER = 0.75;
+const PLAYER_HIT_RADIUS = Number.isFinite(Number(process.env.PLAYER_HIT_RADIUS))
+  ? Math.max(0.4, Number(process.env.PLAYER_HIT_RADIUS))
+  : 0.95;
+const MAX_WEAPON_RANGE = Number.isFinite(Number(process.env.MAX_WEAPON_RANGE))
+  ? Math.max(20, Number(process.env.MAX_WEAPON_RANGE))
+  : 150;
+const DAMAGE_BY_HIT_ZONE = {
+  leg: 15,
+  body: 25,
+  neck: 80,
+  head: 100
+};
 
 const ticketsById = new Map();
 const queuedTicketIds = [];
@@ -31,6 +57,7 @@ const lastMatchSnapshotBroadcastAtMs = new Map();
 
 setInterval(() => {
   currentServerTick += 1;
+  tickAllPlayerMovement();
   runMaintenanceSweep();
   broadcastRealtimeSnapshots();
 }, Math.max(1, Math.floor(1000 / SERVER_TICK_RATE)));
@@ -280,6 +307,18 @@ wsServer.on("connection", (socket) => {
 
     if (message.type === "hit") {
       handleWsHit(socket, message);
+      return;
+    }
+
+    if (message.type === "ping") {
+      try {
+        socket.send(JSON.stringify({
+          type: "pong",
+          clientTimeMs: normalizeInt64(message.clientTimeMs, 0)
+        }));
+      } catch {
+        // ignored
+      }
       return;
     }
 
@@ -546,32 +585,7 @@ function matchTicketToSession(ticket, session, nowMs) {
   }
 
   if (ticket.presence == null) {
-    ticket.presence = {
-      position: { x: 0, y: 0, z: 0 },
-      yaw: 0,
-      lookPitch: 0,
-      shotSeq: 0,
-      reloadSeq: 0,
-      hitPlayerSeq: 0,
-      footstepSeq: 0,
-      isCrouching: false,
-      wallAvoidBlend: 0,
-      isDead: false,
-      deathSeq: 0,
-      deathFallDirX: 0,
-      deathFallDirY: 0,
-      deathFallDirZ: 0,
-      hasPose: false,
-      animSpeed: 0,
-      isAiming: false,
-      isGrounded: true,
-      jumpState: 0,
-      animPhase: 0,
-      sampleTick: 0,
-      sampleTimeMs: 0,
-      serverSampleTimeMs: 0,
-      lastSeenMs: 0
-    };
+    ticket.presence = createDefaultPresence(0, nowMs);
   }
 }
 
@@ -594,32 +608,7 @@ function handleWsJoin(socket, ticketId) {
 
   const nowMs = Date.now();
   if (!ticket.presence) {
-    ticket.presence = {
-      position: { x: 0, y: 0, z: 0 },
-      yaw: 0,
-      lookPitch: 0,
-      shotSeq: 0,
-      reloadSeq: 0,
-      hitPlayerSeq: 0,
-      footstepSeq: 0,
-      isCrouching: false,
-      wallAvoidBlend: 0,
-      isDead: false,
-      deathSeq: 0,
-      deathFallDirX: 0,
-      deathFallDirY: 0,
-      deathFallDirZ: 0,
-      hasPose: false,
-      animSpeed: 0,
-      isAiming: false,
-      isGrounded: true,
-      jumpState: 0,
-      animPhase: 0,
-      sampleTick: currentServerTick,
-      sampleTimeMs: nowMs,
-      serverSampleTimeMs: nowMs,
-      lastSeenMs: nowMs
-    };
+    ticket.presence = createDefaultPresence(currentServerTick, nowMs);
   } else {
     ticket.presence.sampleTick = ticket.presence.sampleTick || currentServerTick;
     ticket.presence.sampleTimeMs = ticket.presence.sampleTimeMs || nowMs;
@@ -668,51 +657,111 @@ function handleWsPose(socket, message) {
   const hitPlayerSeq = Math.max(0, normalizeInt64(message.hitPlayerSeq, 0));
   const footstepSeq = Math.max(0, normalizeInt64(message.footstepSeq, 0));
   const isCrouching = !!message.isCrouching;
+  const isSprinting = !!message.isSprinting;
   const wallAvoidBlend = Math.max(0, Math.min(1, normalizeNumber(message.wallAvoidBlend, 0)));
   const isDead = !!message.isDead;
   const deathSeq = Math.max(0, normalizeInt64(message.deathSeq, 0));
   const deathFallDirX = normalizeNumber(message.deathFallDirX, 0);
   const deathFallDirY = normalizeNumber(message.deathFallDirY, 0);
   const deathFallDirZ = normalizeNumber(message.deathFallDirZ, 0);
-  const animSpeed = Math.max(0, Math.min(1, normalizeNumber(message.animSpeed, 0)));
+  const animSpeed = Math.max(0, Math.min(1.25, normalizeNumber(message.animSpeed, 0)));
   const isAiming = !!message.isAiming;
   const isGrounded = !!message.isGrounded;
   const jumpState = Math.max(0, Math.min(2, normalizeInt64(message.jumpState, isGrounded ? 0 : 2)));
   const rawAnimPhase = normalizeNumber(message.animPhase, 0);
   const animPhase = ((rawAnimPhase % 1) + 1) % 1;
   const poseSeq = normalizeInt64(message.poseSeq, -1);
+  const moveInputX = normalizeNumber(message.moveInputX, 0);
+  const moveInputZ = normalizeNumber(message.moveInputZ, 0);
+  const jumpPressed = !!message.jumpPressed;
+  const inputAuth = !!message.inputAuth;
   const serverSampleTimeMs = Date.now();
-  ticket.presence = {
-    position,
+  const prevPresence = ticket.presence || {};
+  const prevWasDead = !!prevPresence.isDead;
+
+  ticket.inputState = {
+    moveInputX,
+    moveInputZ,
+    jumpPressed,
+    inputAuth,
     yaw,
-    lookPitch,
-    shotSeq,
-    reloadSeq,
-    hitPlayerSeq,
-    footstepSeq,
     isCrouching,
-    wallAvoidBlend,
-    isDead,
-    deathSeq,
-    deathFallDirX,
-    deathFallDirY,
-    deathFallDirZ,
-    hasPose: true,
-    animSpeed,
-    isAiming,
+    isSprinting,
     isGrounded,
     jumpState,
-    animPhase,
-    sampleTick: currentServerTick,
-    sampleTimeMs: serverSampleTimeMs,
-    serverSampleTimeMs,
-    lastSeenMs: serverSampleTimeMs
+    clientX: position.x,
+    clientY: position.y,
+    clientZ: position.z,
+    lastInputMs: serverSampleTimeMs
   };
+
+  if (!ticket.presence) {
+    ticket.presence = createDefaultPresence(currentServerTick, serverSampleTimeMs);
+  }
+
+  const presence = ticket.presence;
+  if (!presence.hasPose) {
+    presence.position = { x: position.x, y: position.y, z: position.z };
+    presence.hasPose = true;
+    presence.velocityX = 0;
+    presence.velocityY = 0;
+    presence.velocityZ = 0;
+  }
+
+  if (!isDead && prevWasDead) {
+    presence.position = { x: position.x, y: position.y, z: position.z };
+    presence.velocityX = 0;
+    presence.velocityY = 0;
+    presence.velocityZ = 0;
+    presence.verticalVelocity = 0;
+  } else if (isDead) {
+    presence.position = { x: position.x, y: position.y, z: position.z };
+    presence.velocityX = 0;
+    presence.velocityY = 0;
+    presence.velocityZ = 0;
+    presence.verticalVelocity = 0;
+  } else if (!inputAuth) {
+    const clamped = clampPositionToMovement(presence, position, currentServerTick);
+    presence.position = clamped;
+    presence.yaw = yaw;
+  } else {
+    presence.yaw = yaw;
+    const clamped = clampPositionToMovement(presence, position, currentServerTick);
+    presence.position = {
+      x: clamped.x,
+      y: position.y,
+      z: clamped.z
+    };
+  }
+
+  presence.lookPitch = lookPitch;
+  presence.shotSeq = shotSeq;
+  presence.reloadSeq = reloadSeq;
+  presence.hitPlayerSeq = hitPlayerSeq;
+  presence.footstepSeq = footstepSeq;
+  presence.isCrouching = isCrouching;
+  presence.isSprinting = isSprinting;
+  presence.wallAvoidBlend = wallAvoidBlend;
+  presence.isDead = isDead;
+  presence.deathSeq = deathSeq;
+  presence.deathFallDirX = deathFallDirX;
+  presence.deathFallDirY = deathFallDirY;
+  presence.deathFallDirZ = deathFallDirZ;
+  presence.animSpeed = animSpeed;
+  presence.isAiming = isAiming;
+  presence.isGrounded = isGrounded;
+  presence.jumpState = jumpState;
+  presence.animPhase = animPhase;
+  presence.sampleTimeMs = serverSampleTimeMs;
+  presence.serverSampleTimeMs = serverSampleTimeMs;
+  presence.lastSeenMs = serverSampleTimeMs;
+
   if (DEBUG_REALTIME) {
     const last = lastPoseDebugByTicket.get(ticket.ticketId) || 0;
     if (serverSampleTimeMs - last >= 1000) {
       lastPoseDebugByTicket.set(ticket.ticketId, serverSampleTimeMs);
-      console.log(`[rt][pose] ticket=${ticket.ticketId} match=${ticket.matchId || "none"} pos=(${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
+      const pos = presence.position;
+      console.log(`[rt][pose] ticket=${ticket.ticketId} match=${ticket.matchId || "none"} pos=(${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)}) inputAuth=${inputAuth ? 1 : 0}`);
     }
   }
 
@@ -729,6 +778,338 @@ function handleWsPose(socket, message) {
     poseTelemetry.lastPoseSeq = poseSeq;
   }
   touchMatchSession(ticket.matchId);
+}
+
+function createDefaultPresence(sampleTick, sampleTimeMs) {
+  return {
+    position: { x: 0, y: 0, z: 0 },
+    yaw: 0,
+    lookPitch: 0,
+    shotSeq: 0,
+    reloadSeq: 0,
+    hitPlayerSeq: 0,
+    footstepSeq: 0,
+    isCrouching: false,
+    isSprinting: false,
+    wallAvoidBlend: 0,
+    isDead: false,
+    deathSeq: 0,
+    deathFallDirX: 0,
+    deathFallDirY: 0,
+    deathFallDirZ: 0,
+    hasPose: false,
+    verticalVelocity: 0,
+    velocityX: 0,
+    velocityY: 0,
+    velocityZ: 0,
+    animSpeed: 0,
+    isAiming: false,
+    isGrounded: true,
+    jumpState: 0,
+    animPhase: 0,
+    sampleTick: sampleTick || 0,
+    sampleTimeMs: sampleTimeMs || 0,
+    serverSampleTimeMs: sampleTimeMs || 0,
+    lastSeenMs: sampleTimeMs || 0
+  };
+}
+
+function tickAllPlayerMovement() {
+  for (const ticket of ticketsById.values()) {
+    if (!ticket || ticket.status !== "Matched" || !ticket.presence || !ticket.presence.hasPose) {
+      continue;
+    }
+
+    tickPlayerMovement(ticket);
+  }
+}
+
+function tickPlayerMovement(ticket) {
+  const presence = ticket.presence;
+  const input = ticket.inputState;
+  const dtSec = 1 / SERVER_TICK_RATE;
+  const prevX = presence.position.x;
+  const prevY = presence.position.y;
+  const prevZ = presence.position.z;
+
+  if (presence.isDead) {
+    presence.sampleTick = currentServerTick;
+    pushStateHistory(ticket);
+    pushPoseHistory(ticket, buildPoseHistoryEntry(ticket));
+    return;
+  }
+
+  if (input && input.inputAuth) {
+    // XZ/Y come from the client pose (CharacterController handles walls). Tick loop only tracks velocity/history.
+    presence.yaw = Number.isFinite(input.yaw) ? input.yaw : presence.yaw;
+    presence.isGrounded = !!input.isGrounded;
+    presence.isCrouching = !!input.isCrouching;
+    presence.isSprinting = !!input.isSprinting;
+    presence.jumpState = Number.isFinite(input.jumpState) ? input.jumpState : presence.jumpState;
+  }
+
+  presence.velocityX = (presence.position.x - prevX) / dtSec;
+  presence.velocityY = (presence.position.y - prevY) / dtSec;
+  presence.velocityZ = (presence.position.z - prevZ) / dtSec;
+  presence.sampleTick = currentServerTick;
+  pushStateHistory(ticket);
+  pushPoseHistory(ticket, buildPoseHistoryEntry(ticket));
+}
+
+function buildPoseHistoryEntry(ticket) {
+  const presence = ticket.presence;
+  return {
+    position: {
+      x: presence.position.x,
+      y: presence.position.y,
+      z: presence.position.z
+    },
+    yaw: presence.yaw,
+    lookPitch: presence.lookPitch || 0,
+    isCrouching: !!presence.isCrouching,
+    sampleTick: currentServerTick,
+    timeMs: Date.now()
+  };
+}
+
+function computeHorizontalDelta(input, dtSec) {
+  const yawRad = (normalizeNumber(input.yaw, 0) * Math.PI) / 180;
+  const forwardX = Math.sin(yawRad);
+  const forwardZ = Math.cos(yawRad);
+  const rightX = Math.cos(yawRad);
+  const rightZ = -Math.sin(yawRad);
+
+  let inputX = normalizeNumber(input.moveInputX, 0);
+  let inputZ = normalizeNumber(input.moveInputZ, 0);
+  const rawMag = Math.hypot(inputX, inputZ);
+  if (rawMag > 1) {
+    inputX /= rawMag;
+    inputZ /= rawMag;
+  }
+
+  inputX *= PLAYER_SIDE_SPEED_MULTIPLIER;
+  if (inputZ < 0) {
+    inputZ *= PLAYER_BACKWARD_SPEED_MULTIPLIER;
+  }
+
+  let moveDirX = rightX * inputX + forwardX * inputZ;
+  let moveDirZ = rightZ * inputX + forwardZ * inputZ;
+  const moveDirMag = Math.hypot(moveDirX, moveDirZ);
+  if (moveDirMag > 1) {
+    moveDirX /= moveDirMag;
+    moveDirZ /= moveDirMag;
+  }
+
+  let speedMultiplier = 1;
+  if (input.isCrouching) {
+    speedMultiplier = PLAYER_CROUCH_MULTIPLIER;
+  } else if (
+    input.isSprinting &&
+    normalizeNumber(input.moveInputZ, 0) > PLAYER_SPRINT_MIN_FORWARD &&
+    rawMag > 0.12
+  ) {
+    speedMultiplier = PLAYER_SPRINT_MULTIPLIER;
+  }
+
+  const horizontalSpeed = PLAYER_MOVE_SPEED * speedMultiplier;
+  return {
+    dx: moveDirX * horizontalSpeed * dtSec,
+    dz: moveDirZ * horizontalSpeed * dtSec
+  };
+}
+
+function pushStateHistory(ticket) {
+  if (!ticket || !ticket.presence || !ticket.presence.hasPose) {
+    return;
+  }
+
+  if (!Array.isArray(ticket.stateHistory)) {
+    ticket.stateHistory = [];
+  }
+
+  const presence = ticket.presence;
+  ticket.stateHistory.push({
+    sampleTick: currentServerTick,
+    x: presence.position.x,
+    y: presence.position.y,
+    z: presence.position.z,
+    yaw: presence.yaw || 0,
+    velX: Number.isFinite(presence.velocityX) ? presence.velocityX : 0,
+    velY: Number.isFinite(presence.velocityY) ? presence.velocityY : 0,
+    velZ: Number.isFinite(presence.velocityZ) ? presence.velocityZ : 0
+  });
+
+  const last = ticket.stateHistory.length >= 2
+    ? ticket.stateHistory[ticket.stateHistory.length - 2]
+    : null;
+  if (last &&
+      last.sampleTick === currentServerTick - 1 &&
+      last.x === presence.position.x &&
+      last.y === presence.position.y &&
+      last.z === presence.position.z &&
+      Math.abs(last.yaw - (presence.yaw || 0)) < 0.01) {
+    ticket.stateHistory.pop();
+    return;
+  }
+
+  const maxEntries = SNAPSHOT_HISTORY_SAMPLES * 3;
+  while (ticket.stateHistory.length > maxEntries) {
+    ticket.stateHistory.shift();
+  }
+}
+
+function getBroadcastStateHistory(ticket) {
+  if (!ticket || !Array.isArray(ticket.stateHistory)) {
+    return [];
+  }
+
+  return ticket.stateHistory.slice(-SNAPSHOT_HISTORY_SAMPLES).map((entry) => ({
+    sampleTick: entry.sampleTick,
+    x: entry.x,
+    y: entry.y,
+    z: entry.z,
+    yaw: entry.yaw,
+    velX: entry.velX,
+    velY: entry.velY,
+    velZ: entry.velZ
+  }));
+}
+
+function pushPoseHistory(ticket, entry) {
+  if (!ticket) {
+    return;
+  }
+
+  if (!Array.isArray(ticket.poseHistory)) {
+    ticket.poseHistory = [];
+  }
+
+  ticket.poseHistory.push(entry);
+  const cutoff = Date.now() - POSE_HISTORY_KEEP_MS;
+  while (ticket.poseHistory.length > 0 && ticket.poseHistory[0].timeMs < cutoff) {
+    ticket.poseHistory.shift();
+  }
+
+  const maxEntries = Math.ceil((POSE_HISTORY_KEEP_MS / 1000) * SERVER_TICK_RATE) + 8;
+  while (ticket.poseHistory.length > maxEntries) {
+    ticket.poseHistory.shift();
+  }
+}
+
+function clampPositionToMovement(prevPresence, nextPosition, sampleTick) {
+  if (!prevPresence || !prevPresence.hasPose || !prevPresence.position || !nextPosition) {
+    return nextPosition;
+  }
+
+  const prevTick = prevPresence.sampleTick || (sampleTick - 1);
+  const dtTicks = Math.max(1, sampleTick - prevTick);
+  const dtSec = dtTicks / SERVER_TICK_RATE;
+  const maxHorizStep = MAX_PLAYER_SPEED * dtSec * 1.35;
+  const dx = nextPosition.x - prevPresence.position.x;
+  const dz = nextPosition.z - prevPresence.position.z;
+  const horiz = Math.hypot(dx, dz);
+  if (horiz <= maxHorizStep) {
+    return nextPosition;
+  }
+
+  const scale = maxHorizStep / Math.max(0.0001, horiz);
+  return {
+    x: prevPresence.position.x + dx * scale,
+    y: nextPosition.y,
+    z: prevPresence.position.z + dz * scale
+  };
+}
+
+function getPoseAtOrBeforeTick(ticket, tick) {
+  if (!ticket) {
+    return null;
+  }
+
+  let best = null;
+  const history = Array.isArray(ticket.poseHistory) ? ticket.poseHistory : [];
+  for (let i = 0; i < history.length; i++) {
+    const entry = history[i];
+    if (!entry || !Number.isFinite(entry.sampleTick)) {
+      continue;
+    }
+
+    if (entry.sampleTick <= tick && (!best || entry.sampleTick > best.sampleTick)) {
+      best = entry;
+    }
+  }
+
+  if (best) {
+    return best;
+  }
+
+  if (ticket.presence && ticket.presence.hasPose) {
+    return ticket.presence;
+  }
+
+  return null;
+}
+
+function resolveServerDamage(message) {
+  const hitZone = typeof message.hitZone === "string" ? message.hitZone.trim().toLowerCase() : "";
+  if (Object.prototype.hasOwnProperty.call(DAMAGE_BY_HIT_ZONE, hitZone)) {
+    return DAMAGE_BY_HIT_ZONE[hitZone];
+  }
+
+  return Math.max(0, Math.min(1000, normalizeNumber(message.damage, 25)));
+}
+
+function validateLagCompensatedHit(attacker, target, message) {
+  const maxRewindTicks = Math.max(8, Math.ceil(SERVER_TICK_RATE * 0.75));
+  const requestedTick = normalizeInt64(message.shotTick, currentServerTick);
+  const shotTick = Math.max(
+    currentServerTick - maxRewindTicks,
+    Math.min(currentServerTick, requestedTick)
+  );
+
+  const victimPose = getPoseAtOrBeforeTick(target, shotTick);
+  const attackerPose = getPoseAtOrBeforeTick(attacker, shotTick);
+  if (!victimPose || !attackerPose || !victimPose.position || !attackerPose.position) {
+    return false;
+  }
+
+  const hx = normalizeNumber(message.hitX, 0);
+  const hy = normalizeNumber(message.hitY, 0);
+  const hz = normalizeNumber(message.hitZ, 0);
+  const vx = victimPose.position.x;
+  const vy = victimPose.position.y;
+  const vz = victimPose.position.z;
+  const victimCenterY = vy + (victimPose.isCrouching ? 0.65 : 0.92);
+  const dx = hx - vx;
+  const dy = hy - victimCenterY;
+  const dz = hz - vz;
+  if (Math.hypot(dx, dy, dz) > PLAYER_HIT_RADIUS) {
+    return false;
+  }
+
+  const ax = attackerPose.position.x;
+  const ay = attackerPose.position.y + 1.55;
+  const az = attackerPose.position.z;
+  const toHitX = hx - ax;
+  const toHitY = hy - ay;
+  const toHitZ = hz - az;
+  const shotDist = Math.hypot(toHitX, toHitY, toHitZ);
+  if (shotDist > MAX_WEAPON_RANGE || shotDist < 0.05) {
+    return false;
+  }
+
+  let dirX = normalizeNumber(message.dirX, 0);
+  let dirY = normalizeNumber(message.dirY, 0);
+  let dirZ = normalizeNumber(message.dirZ, 0);
+  const dirMag = Math.hypot(dirX, dirY, dirZ);
+  if (dirMag <= 0.0001) {
+    return false;
+  }
+
+  dirX /= dirMag;
+  dirY /= dirMag;
+  dirZ /= dirMag;
+  const dot = (dirX * (toHitX / shotDist)) + (dirY * (toHitY / shotDist)) + (dirZ * (toHitZ / shotDist));
+  return dot >= 0.82;
 }
 
 function handleWsHit(socket, message) {
@@ -752,8 +1133,15 @@ function handleWsHit(socket, message) {
     return;
   }
 
-  const damage = Math.max(0, Math.min(1000, normalizeNumber(message.damage, 0)));
+  const damage = resolveServerDamage(message);
   if (damage <= 0) {
+    return;
+  }
+
+  if (!validateLagCompensatedHit(attackerTicket, targetTicket, message)) {
+    if (DEBUG_REALTIME) {
+      console.log(`[rt][hit-reject] attacker=${attackerTicket.ticketId} target=${targetTicket.ticketId}`);
+    }
     return;
   }
 
@@ -814,6 +1202,103 @@ function handleWsDisconnect(socket) {
   }
 }
 
+function encodeSnapshotBinary(payload) {
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const chunks = [];
+    const header = Buffer.alloc(11);
+    header.write("RTS1", 0, 4, "ascii");
+    header.writeUInt8(1, 4);
+    header.writeUInt32LE(payload.serverTick >>> 0, 5);
+    header.writeUInt16LE(payload.serverTickRate >>> 0, 9);
+    chunks.push(header);
+
+    const selfAuth = payload.selfAuthoritative;
+    const hasSelfAuth = !!(selfAuth && selfAuth.position);
+    chunks.push(Buffer.from([hasSelfAuth ? 1 : 0]));
+
+    if (hasSelfAuth) {
+      const selfBuf = Buffer.alloc(20);
+      selfBuf.writeUInt32LE((selfAuth.sampleTick || payload.serverTick) >>> 0, 0);
+      selfBuf.writeFloatLE(selfAuth.position.x, 4);
+      selfBuf.writeFloatLE(selfAuth.position.y, 8);
+      selfBuf.writeFloatLE(selfAuth.position.z, 12);
+      selfBuf.writeFloatLE(selfAuth.yaw || 0, 16);
+      chunks.push(selfBuf);
+    }
+
+    const players = Array.isArray(payload.players) ? payload.players : [];
+    chunks.push(Buffer.from([Math.min(255, players.length)]));
+
+    for (let i = 0; i < players.length; i++) {
+      const player = players[i];
+      const ticketId = typeof player.ticketId === "string" ? player.ticketId : "";
+      const ticketBytes = Buffer.from(ticketId, "utf8");
+      chunks.push(Buffer.from([Math.min(255, ticketBytes.length)]));
+      chunks.push(ticketBytes);
+
+      const pos = player.position || { x: 0, y: 0, z: 0 };
+      const body = Buffer.alloc(35);
+      body.writeUInt32LE((player.sampleTick || payload.serverTick) >>> 0, 0);
+      body.writeFloatLE(pos.x, 4);
+      body.writeFloatLE(pos.y, 8);
+      body.writeFloatLE(pos.z, 12);
+      body.writeFloatLE(player.yaw || 0, 16);
+      body.writeFloatLE(player.velX || 0, 20);
+      body.writeFloatLE(player.velY || 0, 24);
+      body.writeFloatLE(player.velZ || 0, 28);
+      let flags2 = 0;
+      if (player.isDead) flags2 |= 1;
+      if (player.isGrounded !== false) flags2 |= 2;
+      if (player.isCrouching) flags2 |= 4;
+      if (player.isSprinting) flags2 |= 8;
+      if (player.isAiming) flags2 |= 16;
+      body.writeUInt16LE(flags2, 32);
+      body.writeUInt8(Math.max(0, Math.min(2, player.jumpState || 0)), 34);
+      chunks.push(body);
+
+      const meta = Buffer.alloc(48);
+      meta.writeFloatLE(player.lookPitch || 0, 0);
+      meta.writeUInt32LE((player.shotSeq || 0) >>> 0, 4);
+      meta.writeUInt32LE((player.reloadSeq || 0) >>> 0, 8);
+      meta.writeUInt32LE((player.hitPlayerSeq || 0) >>> 0, 12);
+      meta.writeUInt32LE((player.footstepSeq || 0) >>> 0, 16);
+      meta.writeFloatLE(player.wallAvoidBlend || 0, 20);
+      meta.writeFloatLE(player.animSpeed || 0, 24);
+      meta.writeFloatLE(player.animPhase || 0, 28);
+      meta.writeUInt32LE((player.deathSeq || 0) >>> 0, 32);
+      meta.writeFloatLE(player.deathFallDirX || 0, 36);
+      meta.writeFloatLE(player.deathFallDirY || 0, 40);
+      meta.writeFloatLE(player.deathFallDirZ || 0, 44);
+      chunks.push(meta);
+
+      const history = Array.isArray(player.history) ? player.history : [];
+      const historyCount = Math.min(255, history.length);
+      chunks.push(Buffer.from([historyCount]));
+      for (let h = 0; h < historyCount; h++) {
+        const sample = history[h];
+        const sampleBuf = Buffer.alloc(32);
+        sampleBuf.writeUInt32LE((sample.sampleTick || 0) >>> 0, 0);
+        sampleBuf.writeFloatLE(sample.x || 0, 4);
+        sampleBuf.writeFloatLE(sample.y || 0, 8);
+        sampleBuf.writeFloatLE(sample.z || 0, 12);
+        sampleBuf.writeFloatLE(sample.yaw || 0, 16);
+        sampleBuf.writeFloatLE(sample.velX || 0, 20);
+        sampleBuf.writeFloatLE(sample.velY || 0, 24);
+        sampleBuf.writeFloatLE(sample.velZ || 0, 28);
+        chunks.push(sampleBuf);
+      }
+    }
+
+    return Buffer.concat(chunks);
+  } catch {
+    return null;
+  }
+}
+
 function broadcastRealtimeSnapshots() {
   synchronizeActiveMatchCounts();
 
@@ -861,6 +1346,22 @@ function sendSnapshotToSocket(ownerTicketId, socket) {
     players: others
   };
 
+  if (ownerTicket.presence && ownerTicket.presence.hasPose && ownerTicket.presence.position) {
+    payload.selfAuthoritative = {
+      position: ownerTicket.presence.position,
+      yaw: ownerTicket.presence.yaw || 0,
+      sampleTick: ownerTicket.presence.sampleTick || currentServerTick
+    };
+  }
+
+  if (USE_BINARY_SNAPSHOTS) {
+    const binaryPayload = encodeSnapshotBinary(payload);
+    if (binaryPayload) {
+      socket.send(binaryPayload);
+      return;
+    }
+  }
+
   socket.send(JSON.stringify(payload));
 }
 
@@ -905,6 +1406,7 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       hitPlayerSeq: Number.isFinite(ticket.presence.hitPlayerSeq) ? ticket.presence.hitPlayerSeq : 0,
       footstepSeq: Number.isFinite(ticket.presence.footstepSeq) ? ticket.presence.footstepSeq : 0,
       isCrouching: !!ticket.presence.isCrouching,
+      isSprinting: !!ticket.presence.isSprinting,
       wallAvoidBlend: Number.isFinite(ticket.presence.wallAvoidBlend) ? ticket.presence.wallAvoidBlend : 0,
       isDead: !!ticket.presence.isDead,
       deathSeq: Number.isFinite(ticket.presence.deathSeq) ? ticket.presence.deathSeq : 0,
@@ -916,8 +1418,12 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       isGrounded: ticket.presence.isGrounded !== false,
       jumpState: Number.isFinite(ticket.presence.jumpState) ? ticket.presence.jumpState : 0,
       animPhase: Number.isFinite(ticket.presence.animPhase) ? ticket.presence.animPhase : 0,
+      velX: Number.isFinite(ticket.presence.velocityX) ? ticket.presence.velocityX : 0,
+      velY: Number.isFinite(ticket.presence.velocityY) ? ticket.presence.velocityY : 0,
+      velZ: Number.isFinite(ticket.presence.velocityZ) ? ticket.presence.velocityZ : 0,
       sampleTick: ticket.presence.sampleTick || currentServerTick,
-      sampleTimeMs: ticket.presence.sampleTimeMs || ticket.presence.serverSampleTimeMs || Date.now()
+      sampleTimeMs: ticket.presence.sampleTimeMs || ticket.presence.serverSampleTimeMs || Date.now(),
+      history: getBroadcastStateHistory(ticket)
     });
   }
 

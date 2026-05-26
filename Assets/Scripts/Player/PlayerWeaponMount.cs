@@ -69,6 +69,13 @@ namespace ShooterPrototype.Player
         [SerializeField] private bool enableAdsCameraZoom = true;
         [SerializeField] private float adsCameraFov = 55f;
         [SerializeField] private float adsCameraZoomSmoothTime = 0.08f;
+        [Header("Sprint")]
+        [SerializeField] private Vector3 sprintWeaponLocalOffset = new Vector3(-0.13f, 0f, -0.16f);
+        [SerializeField] private Vector3 sprintWeaponLocalEuler = new Vector3(3.18f, -57.1f, -20f);
+        [SerializeField] private float sprintBlendSmoothTime = 0.14f;
+        [SerializeField] private float sprintBobAmplitudeMultiplier = 1.7f;
+        [SerializeField] private float sprintBobFrequencyMultiplier = 1.65f;
+        [SerializeField] private float sprintBobSmoothTime = 0.06f;
         [Header("Crouch")]
         [SerializeField] private float crouchWeaponDrop = 0.18f;
         [SerializeField] private float crouchBlendSmoothTime = 0.16f;
@@ -117,6 +124,10 @@ namespace ShooterPrototype.Player
         private float networkAdsBlend;
         private float networkCrouchBlend;
         private float networkWallAvoidBlend;
+        private bool networkSprinting;
+        private float sprintBlend;
+        private float sprintBlendVelocity;
+        private float previousSprintTarget;
         private float crouchBlend;
         private float crouchBlendVelocity;
         private bool localReloading;
@@ -201,6 +212,11 @@ namespace ShooterPrototype.Player
             networkWallAvoidBlend = Mathf.Clamp01(blend);
         }
 
+        public void SetNetworkSprintState(bool isSprinting)
+        {
+            networkSprinting = isSprinting;
+        }
+
         public void SetLocalReloading(bool reloading)
         {
             localReloading = reloading;
@@ -228,10 +244,32 @@ namespace ShooterPrototype.Player
                 amount = speed;
             }
 
+            if (fpsController == null)
+            {
+                fpsController = GetComponent<FpsCharacterController>();
+            }
+
+            var localSprinting = !useNetworkState && fpsController != null && fpsController.IsSprinting;
+            var sprintTarget = useNetworkState
+                ? (networkSprinting ? 1f : 0f)
+                : (localSprinting ? 1f : 0f);
+            sprintBlend = Mathf.SmoothDamp(
+                sprintBlend,
+                sprintTarget,
+                ref sprintBlendVelocity,
+                Mathf.Max(0.01f, sprintBlendSmoothTime));
+
+            if (sprintTarget > 0.5f && previousSprintTarget <= 0.5f)
+            {
+                bobPositionVelocity = Vector3.zero;
+                bobRotationVelocity = 0f;
+            }
+            previousSprintTarget = sprintTarget;
+
             if (enableAimDownSights && !useNetworkState)
             {
                 localAimHeld = ReadAimPressed();
-                var targetBlend = (localAimHeld && !localReloading) ? 1f : 0f;
+                var targetBlend = (localAimHeld && !localReloading && !localSprinting) ? 1f : 0f;
                 adsBlend = Mathf.SmoothDamp(
                     adsBlend,
                     targetBlend,
@@ -263,10 +301,6 @@ namespace ShooterPrototype.Player
 
             UpdateAdsCameraZoom();
 
-            if (fpsController == null)
-            {
-                fpsController = GetComponent<FpsCharacterController>();
-            }
             var targetCrouchBlend = useNetworkState
                 ? networkCrouchBlend
                 : (fpsController != null ? fpsController.CrouchBlend01 : 0f);
@@ -326,6 +360,11 @@ namespace ShooterPrototype.Player
                     targetAnchorLocalPosition.y -= crouchWeaponDrop * crouchBlend * hipDropScale;
                 }
                 var targetAnchorLocalRotation = Quaternion.Slerp(hipLocalRotation, adsLocalRotation, adsBlend);
+                if (sprintBlend > 0.0001f)
+                {
+                    targetAnchorLocalPosition += sprintWeaponLocalOffset * sprintBlend;
+                    targetAnchorLocalRotation *= Quaternion.Euler(sprintWeaponLocalEuler * sprintBlend);
+                }
                 ApplyWallAvoidance(ref targetAnchorLocalPosition, ref targetAnchorLocalRotation, wallTargetBlend);
 
                 weaponParent.localPosition = Vector3.SmoothDamp(
@@ -344,34 +383,73 @@ namespace ShooterPrototype.Player
 
             var isAdsCameraFollow = adsPitchFollowBlend > 0.001f && cameraPivot != null && (adsUseSightLock || adsLockToCameraPivot);
             var hipPitchInfluence = 1f - adsPitchFollowBlend;
+            if (sprintBlend > 0.0001f)
+            {
+                // During sprint, suppress camera pitch-driven weapon tilt completely.
+                hipPitchInfluence = 0f;
+            }
+
             var bobPosAmount = isAdsCameraFollow
                 ? 0f
                 : amount * Mathf.Lerp(1f, Mathf.Clamp01(adsBobPositionMultiplier), adsBlend);
             var bobRotAmount = isAdsCameraFollow
                 ? 0f
                 : amount * Mathf.Lerp(1f, Mathf.Clamp01(adsBobRotationMultiplier), adsBlend);
+            if (sprintBlend > 0.0001f)
+            {
+                var sprintAmp = Mathf.Lerp(1f, Mathf.Max(1f, sprintBobAmplitudeMultiplier), sprintBlend);
+                bobPosAmount *= sprintAmp;
+                bobRotAmount *= sprintAmp;
+            }
+
             var idleSwayAmount = 0f;
-            if (enableIdleSway && !isAdsCameraFollow)
+            if (enableIdleSway && !isAdsCameraFollow && sprintBlend < 0.95f)
             {
                 var threshold = Mathf.Max(0.001f, idleFreezeSpeedThreshold * 2f);
-                idleSwayAmount = Mathf.Clamp01((threshold - amount) / threshold) * (1f - Mathf.Clamp01(adsBlend));
+                idleSwayAmount = Mathf.Clamp01((threshold - amount) / threshold) *
+                                   (1f - Mathf.Clamp01(adsBlend)) *
+                                   (1f - sprintBlend);
+            }
+            if (sprintBlend > 0.0001f)
+            {
+                phase *= Mathf.Lerp(1f, Mathf.Max(1f, sprintBobFrequencyMultiplier), sprintBlend);
             }
             var idlePhase = Time.unscaledTime * Mathf.Max(0.1f, idleSwaySpeed);
 
-            var targetPos = baseLocalPosition + new Vector3(
-                Mathf.Sin(phase) * bobPositionX * bobPosAmount,
-                Mathf.Cos(phase * 2f) * bobPositionY * bobPosAmount,
-                0f);
-            targetPos += new Vector3(
-                Mathf.Sin(idlePhase) * idleSwayPositionX * idleSwayAmount,
-                Mathf.Cos(idlePhase * 1.7f) * idleSwayPositionY * idleSwayAmount,
-                0f);
+            var targetPos = baseLocalPosition;
+            if (bobPosAmount > 0.0001f)
+            {
+                targetPos += new Vector3(
+                    Mathf.Sin(phase) * bobPositionX * bobPosAmount,
+                    Mathf.Cos(phase * 2f) * bobPositionY * bobPosAmount,
+                    0f);
+            }
 
-            var zAngleOffset = Mathf.Sin(phase) * bobRotationZ * bobRotAmount;
-            zAngleOffset += Mathf.Sin(idlePhase * 0.85f) * idleSwayRotationZ * idleSwayAmount;
+            if (idleSwayAmount > 0.0001f)
+            {
+                targetPos += new Vector3(
+                    Mathf.Sin(idlePhase) * idleSwayPositionX * idleSwayAmount,
+                    Mathf.Cos(idlePhase * 1.7f) * idleSwayPositionY * idleSwayAmount,
+                    0f);
+            }
+
+            var zAngleOffset = 0f;
+            if (bobRotAmount > 0.0001f)
+            {
+                zAngleOffset += Mathf.Sin(phase) * bobRotationZ * bobRotAmount;
+            }
+
+            if (idleSwayAmount > 0.0001f)
+            {
+                zAngleOffset += Mathf.Sin(idlePhase * 0.85f) * idleSwayRotationZ * idleSwayAmount;
+            }
+
             var targetRot = baseLocalRotation * Quaternion.Euler(0f, 0f, zAngleOffset);
 
-            var bobSmooth = Mathf.Max(0.01f, bobSmoothing);
+            var bobSmooth = Mathf.Lerp(
+                Mathf.Max(0.01f, bobSmoothing),
+                Mathf.Max(0.05f, sprintBobSmoothTime),
+                sprintBlend);
             var smoothedPos = Vector3.SmoothDamp(
                 weaponInstance.transform.localPosition,
                 targetPos,
@@ -425,6 +503,13 @@ namespace ShooterPrototype.Player
                 pitchSmooth);
 
             weaponInstance.transform.localPosition = smoothedPos;
+            if (wallAvoidBlend > 0.05f)
+            {
+                var localPos = weaponInstance.transform.localPosition;
+                localPos.z = Mathf.Min(localPos.z, baseLocalPosition.z);
+                weaponInstance.transform.localPosition = localPos;
+            }
+
             weaponInstance.transform.localRotation = Quaternion.Euler(
                 baseLocalRotation.eulerAngles.x + smoothedPitchOffset,
                 baseLocalRotation.eulerAngles.y + smoothedPitchYawOffset,
@@ -679,16 +764,23 @@ namespace ShooterPrototype.Player
             ref Quaternion targetAnchorLocalRotation,
             float targetBlend)
         {
-            if (!enableWeaponCollisionAvoidance)
+            var target = enableWeaponCollisionAvoidance ? Mathf.Clamp01(targetBlend) : 0f;
+            if (target > wallAvoidBlend)
             {
-                targetBlend = 0f;
+                wallAvoidBlend = Mathf.MoveTowards(
+                    wallAvoidBlend,
+                    target,
+                    Time.deltaTime / Mathf.Max(0.01f, wallAvoidSmoothTime));
+            }
+            else
+            {
+                wallAvoidBlend = Mathf.SmoothDamp(
+                    wallAvoidBlend,
+                    target,
+                    ref wallAvoidBlendVelocity,
+                    Mathf.Max(0.01f, wallAvoidSmoothTime));
             }
 
-            wallAvoidBlend = Mathf.SmoothDamp(
-                wallAvoidBlend,
-                Mathf.Clamp01(targetBlend),
-                ref wallAvoidBlendVelocity,
-                Mathf.Max(0.01f, wallAvoidSmoothTime));
             var blend = Mathf.Clamp01(wallAvoidBlend);
             if (blend <= 0.0001f)
             {
@@ -728,23 +820,93 @@ namespace ShooterPrototype.Player
                 return 0f;
             }
 
+            var checkPoint = GetWeaponWallCheckPoint();
+            var direction = cameraPivot.forward;
             var distance = Mathf.Max(0.05f, wallCheckDistance);
             var radius = Mathf.Max(0.01f, wallCheckRadius);
-            var ray = new Ray(cameraPivot.position, cameraPivot.forward);
-            if (!Physics.SphereCast(ray, radius, out var hit, distance, wallCheckMask, QueryTriggerInteraction.Ignore))
+            var castOrigin = checkPoint - direction * radius;
+            var castDistance = distance + radius;
+
+            if (Physics.SphereCast(
+                    castOrigin,
+                    radius,
+                    direction,
+                    out var hit,
+                    castDistance,
+                    wallCheckMask,
+                    QueryTriggerInteraction.Ignore) &&
+                !IsOwnedCollider(hit.collider))
+            {
+                var surfaceDistance = Mathf.Max(0f, hit.distance - radius);
+                return ComputeWallAvoidBlend(surfaceDistance, distance);
+            }
+
+            // Flush against wall: cast can miss when the probe is already inside geometry.
+            return ComputeOverlapWallBlend(checkPoint, radius);
+        }
+
+        private Vector3 GetWeaponWallCheckPoint()
+        {
+            if (cameraPivot == null)
+            {
+                return transform.position;
+            }
+
+            if (weaponParent == null || weaponParent.parent == null)
+            {
+                return cameraPivot.position + cameraPivot.forward * hipAnchorLocalPosition.z;
+            }
+
+            var parent = weaponParent.parent;
+            var hipWorld = parent.TransformPoint(hipAnchorLocalPosition);
+            if (adsBlend <= 0.001f)
+            {
+                return hipWorld;
+            }
+
+            var adsWorld = parent.TransformPoint(adsAnchorLocalPosition);
+            return Vector3.Lerp(hipWorld, adsWorld, adsBlend);
+        }
+
+        private float ComputeOverlapWallBlend(Vector3 center, float radius)
+        {
+            var hits = Physics.OverlapSphere(center, radius, wallCheckMask, QueryTriggerInteraction.Ignore);
+            var bestBlend = 0f;
+            for (var i = 0; i < hits.Length; i++)
+            {
+                if (IsOwnedCollider(hits[i]))
+                {
+                    continue;
+                }
+
+                var closest = hits[i].ClosestPoint(center);
+                var penetration = radius - Vector3.Distance(center, closest);
+                if (penetration <= 0.001f)
+                {
+                    continue;
+                }
+
+                bestBlend = Mathf.Max(bestBlend, Mathf.Clamp01(penetration / radius));
+            }
+
+            if (bestBlend <= 0f)
             {
                 return 0f;
             }
 
-            if (hit.collider != null && hit.collider.transform.IsChildOf(transform))
-            {
-                return 0f;
-            }
+            return Mathf.Clamp01(Mathf.Max(Mathf.Clamp01(wallAvoidMinBlendOnHit), bestBlend));
+        }
 
-            var normalized = 1f - Mathf.Clamp01(hit.distance / distance);
+        private float ComputeWallAvoidBlend(float surfaceDistance, float maxDistance)
+        {
+            var normalized = 1f - Mathf.Clamp01(surfaceDistance / maxDistance);
             normalized = Mathf.Pow(Mathf.Clamp01(normalized), Mathf.Max(0.01f, wallAvoidResponsePower));
-            var minBlend = Mathf.Clamp01(wallAvoidMinBlendOnHit);
-            return Mathf.Clamp01(Mathf.Max(minBlend, normalized));
+            return Mathf.Clamp01(Mathf.Max(Mathf.Clamp01(wallAvoidMinBlendOnHit), normalized));
+        }
+
+        private bool IsOwnedCollider(Collider collider)
+        {
+            return collider != null && collider.transform.IsChildOf(transform);
         }
 
         private static float NormalizeAngleSigned(float angle)

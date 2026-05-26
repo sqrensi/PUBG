@@ -54,6 +54,7 @@ namespace ShooterPrototype.Player
         private Coroutine simpleDeathFallRoutine;
         private Vector3 deathFallBasePosition;
         private Vector3 deathFallDirection = Vector3.forward;
+        private MatchPresenceSync presenceSync;
 
         public float MaxHealth => Mathf.Max(1f, maxHealth);
         public float CurrentHealth => Mathf.Clamp(currentHealth, 0f, MaxHealth);
@@ -71,6 +72,7 @@ namespace ShooterPrototype.Player
             characterController = GetComponent<CharacterController>();
             identity = GetComponent<PlayerNetworkIdentity>();
             locomotionRig = GetComponentInChildren<ProceduralLocomotionRig>(true);
+            presenceSync = GetComponent<MatchPresenceSync>();
         }
 
         private void OnEnable()
@@ -171,12 +173,13 @@ namespace ShooterPrototype.Player
 
         private IEnumerator RespawnRoutine()
         {
-            yield return new WaitForSeconds(Mathf.Max(0.1f, respawnDelaySeconds));
+            yield return new WaitForSecondsRealtime(Mathf.Max(0.1f, respawnDelaySeconds));
 
             var (position, rotation) = ResolveRespawnPose();
             transform.position = position;
             transform.rotation = rotation;
             ExitDeathState(restoreHealth: true);
+            presenceSync?.FlushLocalPose();
 
             respawnRoutine = null;
         }
@@ -233,6 +236,7 @@ namespace ShooterPrototype.Player
             isDead = true;
             if (fpsController != null)
             {
+                fpsController.SetServerReconciliationSuspended(true);
                 fpsController.enabled = false;
             }
 
@@ -260,6 +264,8 @@ namespace ShooterPrototype.Player
 
                 respawnRoutine = StartCoroutine(RespawnRoutine());
             }
+
+            presenceSync?.FlushLocalPose();
         }
 
         private void ExitDeathState(bool restoreHealth)
@@ -279,6 +285,7 @@ namespace ShooterPrototype.Player
 
             if (!networkMode && fpsController != null)
             {
+                fpsController.NotifyLocalRespawned(1f);
                 fpsController.enabled = true;
             }
 

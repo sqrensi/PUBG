@@ -7,6 +7,7 @@ namespace ShooterPrototype.Player
     {
         [Header("Clips")]
         [SerializeField] private AudioClip[] footstepClips;
+        [SerializeField] private AudioClip[] sprintFootstepClips;
         [SerializeField] private AudioClip[] remoteFootstepClips;
         [SerializeField] private AudioClip jumpClip;
         [SerializeField] private AudioClip shotClip;
@@ -20,6 +21,8 @@ namespace ShooterPrototype.Player
         [SerializeField] private float masterVolume = 1f;
         [Range(0f, 1f)]
         [SerializeField] private float footstepVolume = 0.35f;
+        [Range(0f, 1f)]
+        [SerializeField] private float sprintFootstepVolumeMultiplier = 1.12f;
         [Range(0f, 1f)]
         [SerializeField] private float jumpVolume = 0.5f;
         [Range(0f, 1f)]
@@ -45,6 +48,7 @@ namespace ShooterPrototype.Player
         private AudioSource nearSource;
         private AudioSource shotSource;
         private int footstepIndex;
+        private int sprintFootstepIndex;
         private Coroutine reloadAudioRoutine;
 
         private void Awake()
@@ -53,15 +57,21 @@ namespace ShooterPrototype.Player
             shotSource = CreateSource("AudioShot", shotMaxDistance);
         }
 
-        public void PlayFootstep(bool isLocal)
+        public void PlayFootstep(bool isLocal, bool isSprinting = false)
         {
-            var clip = GetNextFootstepClip(isLocal);
+            var clip = GetNextFootstepClip(isLocal, isSprinting);
             if (clip == null)
             {
                 return;
             }
 
-            PlayClip(nearSource, clip, footstepVolume, isLocal, defaultMaxDistance);
+            var volume = footstepVolume;
+            if (isLocal && isSprinting)
+            {
+                volume *= sprintFootstepVolumeMultiplier;
+            }
+
+            PlayClip(nearSource, clip, volume, isLocal, defaultMaxDistance);
         }
 
         public void PlayJump(bool isLocal)
@@ -124,12 +134,25 @@ namespace ShooterPrototype.Player
             source.PlayOneShot(clip, Mathf.Clamp01(volume) * Mathf.Clamp01(masterVolume));
         }
 
-        private AudioClip GetNextFootstepClip(bool isLocal)
+        private AudioClip GetNextFootstepClip(bool isLocal, bool isSprinting)
         {
-            var clips = isLocal ? footstepClips : remoteFootstepClips;
-            if (clips == null || clips.Length == 0)
+            AudioClip[] clips;
+            if (isLocal)
             {
-                clips = footstepClips;
+                clips = isSprinting ? sprintFootstepClips : footstepClips;
+                if (clips == null || clips.Length == 0)
+                {
+                    clips = footstepClips;
+                }
+            }
+            else
+            {
+                // Remote sprint uses the same clips as remote walk; cadence comes from network footstepSeq.
+                clips = remoteFootstepClips;
+                if (clips == null || clips.Length == 0)
+                {
+                    clips = footstepClips;
+                }
             }
 
             if (clips == null || clips.Length == 0)
@@ -137,8 +160,18 @@ namespace ShooterPrototype.Player
                 return null;
             }
 
-            var idx = Mathf.Abs(footstepIndex) % clips.Length;
-            footstepIndex++;
+            int idx;
+            if (isLocal && isSprinting)
+            {
+                idx = Mathf.Abs(sprintFootstepIndex) % clips.Length;
+                sprintFootstepIndex++;
+            }
+            else
+            {
+                idx = Mathf.Abs(footstepIndex) % clips.Length;
+                footstepIndex++;
+            }
+
             return clips[idx];
         }
 
