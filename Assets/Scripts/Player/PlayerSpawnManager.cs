@@ -140,6 +140,15 @@ namespace ShooterPrototype.Player
                 weaponController.Configure(localCamera, null);
             }
 
+            var viewPresentation = instance.GetComponent<PlayerViewPresentation>();
+            if (viewPresentation != null)
+            {
+                viewPresentation.Configure(true);
+            }
+
+            var splitBody = instance.GetComponent<SyntySplitBodyPresentation>();
+            splitBody?.ApplyViewMode();
+
             if (enableMatchPresenceSync)
             {
                 AttachPresenceSync(instance);

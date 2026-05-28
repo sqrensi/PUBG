@@ -75,6 +75,8 @@ namespace ShooterPrototype.Player
             public float NetworkAnimSpeed;
             public float NetworkAnimPhase;
             public float NetworkLookPitch;
+            public float NetworkMoveInputX;
+            public float NetworkMoveInputZ;
             public Vector2 HorizontalSmoothVelocity;
             public float VerticalSmoothVelocity;
             public int LastAppliedShotSeq = -1;
@@ -289,6 +291,8 @@ namespace ShooterPrototype.Player
                 return;
             }
 
+            ResolveRemoteMoveInput(avatar, pose, out var moveInputX, out var moveInputZ);
+            avatar.LocomotionRig.SetNetworkMoveInput(moveInputX, moveInputZ);
             avatar.LocomotionRig.SetNetworkAnimationState(
                 avatar.NetworkAnimSpeed,
                 avatar.NetworkGrounded,
@@ -297,6 +301,43 @@ namespace ShooterPrototype.Player
                 avatar.NetworkCrouching,
                 avatar.NetworkSprinting);
             avatar.LocomotionRig.SetNetworkLookPitch(avatar.NetworkLookPitch);
+        }
+
+        private static void ResolveRemoteMoveInput(
+            RemoteAvatar avatar,
+            InterpolatedPose pose,
+            out float moveInputX,
+            out float moveInputZ)
+        {
+            moveInputX = avatar.NetworkMoveInputX;
+            moveInputZ = avatar.NetworkMoveInputZ;
+            if (Mathf.Abs(moveInputX) > 0.01f || Mathf.Abs(moveInputZ) > 0.01f)
+            {
+                return;
+            }
+
+            if (avatar.NetworkAnimSpeed <= 0.05f)
+            {
+                moveInputX = 0f;
+                moveInputZ = 0f;
+                return;
+            }
+
+            var flatVelocity = new Vector3(pose.Velocity.x, 0f, pose.Velocity.z);
+            if (flatVelocity.sqrMagnitude < 0.04f)
+            {
+                return;
+            }
+
+            var localDirection = Quaternion.Euler(0f, -pose.Yaw, 0f) * flatVelocity;
+            var magnitude = new Vector2(localDirection.x, localDirection.z).magnitude;
+            if (magnitude <= 0.01f)
+            {
+                return;
+            }
+
+            moveInputX = localDirection.x / magnitude;
+            moveInputZ = localDirection.z / magnitude;
         }
 
         public void FlushLocalPose()
@@ -675,6 +716,8 @@ namespace ShooterPrototype.Player
                     avatar.NetworkAnimSpeed = p.animSpeed;
                     avatar.NetworkAnimPhase = p.animPhase;
                     avatar.NetworkLookPitch = p.lookPitch;
+                    avatar.NetworkMoveInputX = p.moveInputX;
+                    avatar.NetworkMoveInputZ = p.moveInputZ;
                     IngestPlayerStateSamples(avatar, p);
 
                     var weaponMount = avatar.Root.GetComponent<PlayerWeaponMount>();
@@ -694,6 +737,16 @@ namespace ShooterPrototype.Player
 
                     if (avatar.LocomotionRig != null)
                     {
+                        ResolveRemoteMoveInput(
+                            avatar,
+                            new InterpolatedPose
+                            {
+                                Yaw = p.yaw,
+                                Velocity = new Vector3(p.velX, p.velY, p.velZ)
+                            },
+                            out var moveInputX,
+                            out var moveInputZ);
+                        avatar.LocomotionRig.SetNetworkMoveInput(moveInputX, moveInputZ);
                         avatar.LocomotionRig.SetNetworkAnimationState(
                             p.animSpeed,
                             avatar.NetworkGrounded,
@@ -741,6 +794,9 @@ namespace ShooterPrototype.Player
                 presentation.Configure(false);
             }
 
+            var splitBody = root.GetComponent<SyntySplitBodyPresentation>();
+            splitBody?.ApplyViewMode();
+
             var identity = root.GetComponent<PlayerNetworkIdentity>();
             if (identity == null)
             {
@@ -749,6 +805,9 @@ namespace ShooterPrototype.Player
             identity.Configure(ticketId, false);
 
             EnsureRemoteVisuals(root);
+
+            var remoteBootstrap = root.GetComponent<RemoteThirdPersonPlayerBootstrap>();
+            remoteBootstrap?.ApplyRemoteThirdPersonMode();
 
             var fpsController = root.GetComponent<FpsCharacterController>();
             if (fpsController != null)
@@ -789,6 +848,12 @@ namespace ShooterPrototype.Player
             if (locomotionRig != null)
             {
                 locomotionRig.SetNetworkMode(true);
+            }
+
+            var syntyDriver = root.GetComponentInChildren<SyntyLocomotionDriver>(true);
+            if (syntyDriver != null)
+            {
+                syntyDriver.SetNetworkMode(true);
             }
 
             var selfSync = root.GetComponent<MatchPresenceSync>();
@@ -930,7 +995,8 @@ namespace ShooterPrototype.Player
                     continue;
                 }
 
-                if (string.Equals(tr.name, "FirstPersonHands", StringComparison.Ordinal))
+                if (string.Equals(tr.name, "FirstPersonHands", StringComparison.Ordinal) ||
+                    string.Equals(tr.name, "FirstPersonView", StringComparison.Ordinal))
                 {
                     tr.gameObject.SetActive(false);
                 }

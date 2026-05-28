@@ -13,22 +13,49 @@ namespace ShooterPrototype.Player
         [SerializeField] private Vector3 localPositionOffset = Vector3.zero;
         [SerializeField] private Vector3 localEulerOffset = Vector3.zero;
         [SerializeField] private float uniformScale = 1f;
+        [SerializeField] private float additionalVisualScale = 1f;
 
         [Header("Hide Procedural Body")]
         [SerializeField] private bool hideProceduralLines = true;
-        [SerializeField] private bool disableThreadArmRig = false;
+        [SerializeField] private bool disableThreadArmRig = true;
         [SerializeField] private bool disableHeadMaskSelector = true;
+        [SerializeField] private bool disableProceduralLocomotionVisuals = true;
 
         [Header("First Person")]
+        [SerializeField] private bool showSyntyMeshInFirstPerson = false;
+        [SerializeField] private bool showArmsOnlyInFirstPerson = true;
         [SerializeField] private bool hideHeadInFirstPerson = true;
         [SerializeField] private string firstPersonArmNameContains = "Hand";
         [SerializeField] private string firstPersonLegNameContains = "Leg";
         [SerializeField] private string firstPersonHeadNameContains = "Head";
 
+        private static readonly string[] FirstPersonArmBoneNames =
+        {
+            "Clavicle_L", "Clavicle_R",
+            "Shoulder_L", "Shoulder_R",
+            "Elbow_L", "Elbow_R",
+            "UpperArm_L", "UpperArm_R",
+            "LowerArm_L", "LowerArm_R",
+            "Hand_L", "Hand_R"
+        };
+
         private PlayerViewPresentation viewPresentation;
+        private SyntyFirstPersonArmsPresenter firstPersonArmsPresenter;
         private bool configured;
 
         public Transform SyntyVisualRoot => syntyVisualRoot;
+        public bool ShowSyntyMeshInFirstPerson => showSyntyMeshInFirstPerson;
+        public bool ShowArmsOnlyInFirstPerson => showArmsOnlyInFirstPerson;
+
+        public bool IsRendererUnderSyntyVisual(Transform rendererTransform)
+        {
+            if (syntyVisualRoot == null || rendererTransform == null)
+            {
+                return false;
+            }
+
+            return rendererTransform == syntyVisualRoot || rendererTransform.IsChildOf(syntyVisualRoot);
+        }
 
         public void Configure(
             Transform visualRoot,
@@ -42,12 +69,31 @@ namespace ShooterPrototype.Player
             uniformScale = Mathf.Max(0.01f, scale);
             ApplyVisualTransform();
             ApplyProceduralVisibility();
+            ApplyMecanimMode();
             configured = true;
+        }
+
+        public void ApplyMecanimMode()
+        {
+            ApplyProceduralVisibility();
+
+            var locomotionRig = GetComponentInChildren<ProceduralLocomotionRig>(true);
+            if (locomotionRig != null && disableProceduralLocomotionVisuals)
+            {
+                locomotionRig.SetProceduralVisualsEnabled(false);
+            }
+
+            var viewPresentation = GetComponent<PlayerViewPresentation>();
+            if (viewPresentation != null)
+            {
+                viewPresentation.RefreshViewMode();
+            }
         }
 
         private void Awake()
         {
             viewPresentation = GetComponent<PlayerViewPresentation>();
+            firstPersonArmsPresenter = GetComponent<SyntyFirstPersonArmsPresenter>();
             ApplyVisualTransform();
             ApplyProceduralVisibility();
         }
@@ -56,7 +102,7 @@ namespace ShooterPrototype.Player
         {
             ApplyVisualTransform();
             ApplyProceduralVisibility();
-            viewPresentation?.RefreshViewMode();
+            ApplyMecanimMode();
         }
 
         private void ApplyVisualTransform()
@@ -68,14 +114,22 @@ namespace ShooterPrototype.Player
 
             syntyVisualRoot.localPosition = localPositionOffset;
             syntyVisualRoot.localRotation = Quaternion.Euler(localEulerOffset);
-            syntyVisualRoot.localScale = Vector3.one * uniformScale;
+            syntyVisualRoot.localScale = Vector3.one * uniformScale * Mathf.Max(0.01f, additionalVisualScale);
         }
 
         private void ApplyProceduralVisibility()
         {
             if (hideProceduralLines)
             {
-                HideNamedObjects(transform, "TorsoLine", "NeckLine", "LeftLegLine", "RightLegLine", "WhiteMaskHead");
+                HideNamedObjects(
+                    transform,
+                    "TorsoLine",
+                    "NeckLine",
+                    "LeftLegLine",
+                    "RightLegLine",
+                    "LeftThread",
+                    "RightThread",
+                    "WhiteMaskHead");
             }
 
             if (disableThreadArmRig)
@@ -99,6 +153,24 @@ namespace ShooterPrototype.Player
 
         public bool ShouldShowRendererInFirstPerson(string objectName, Transform rendererTransform)
         {
+            if (showArmsOnlyInFirstPerson && !showSyntyMeshInFirstPerson)
+            {
+                if (firstPersonArmsPresenter != null &&
+                    rendererTransform != null &&
+                    firstPersonArmsPresenter.IsFirstPersonArmsRenderer(rendererTransform.GetComponent<Renderer>()))
+                {
+                    return true;
+                }
+
+                if (IsRendererUnderArmBoneHierarchy(rendererTransform))
+                {
+                    return true;
+                }
+
+                return ContainsName(objectName, firstPersonArmNameContains) ||
+                       IsTransformUnderNameToken(rendererTransform, firstPersonArmNameContains);
+            }
+
             if (!hideHeadInFirstPerson || !ContainsName(objectName, firstPersonHeadNameContains))
             {
                 if (ContainsName(objectName, firstPersonArmNameContains))
@@ -106,19 +178,23 @@ namespace ShooterPrototype.Player
                     return true;
                 }
 
-                var current = rendererTransform != null ? rendererTransform : null;
-                while (current != null)
+                if (IsTransformUnderNameToken(rendererTransform, firstPersonArmNameContains))
                 {
-                    if (ContainsName(current.name, firstPersonArmNameContains))
-                    {
-                        return true;
-                    }
-
-                    current = current.parent;
+                    return true;
                 }
             }
 
             return false;
+        }
+
+        public bool ShouldHideSourceBodyInFirstPerson(Renderer renderer)
+        {
+            if (!showArmsOnlyInFirstPerson || showSyntyMeshInFirstPerson)
+            {
+                return false;
+            }
+
+            return firstPersonArmsPresenter != null && firstPersonArmsPresenter.IsSourceBodyRenderer(renderer);
         }
 
         public bool ShouldHideRendererInFirstPerson(string objectName, Transform rendererTransform)
@@ -145,6 +221,46 @@ namespace ShooterPrototype.Player
                     ContainsName(current.name, firstPersonLegNameContains))
                 {
                     return true;
+                }
+
+                current = current.parent;
+            }
+
+            return false;
+        }
+
+        private static bool IsTransformUnderNameToken(Transform rendererTransform, string token)
+        {
+            var current = rendererTransform;
+            while (current != null)
+            {
+                if (ContainsName(current.name, token))
+                {
+                    return true;
+                }
+
+                current = current.parent;
+            }
+
+            return false;
+        }
+
+        private static bool IsRendererUnderArmBoneHierarchy(Transform rendererTransform)
+        {
+            if (rendererTransform == null)
+            {
+                return false;
+            }
+
+            var current = rendererTransform;
+            while (current != null)
+            {
+                for (var i = 0; i < FirstPersonArmBoneNames.Length; i++)
+                {
+                    if (string.Equals(current.name, FirstPersonArmBoneNames[i], System.StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
                 }
 
                 current = current.parent;

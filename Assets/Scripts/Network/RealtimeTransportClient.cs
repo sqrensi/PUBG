@@ -52,6 +52,8 @@ namespace ShooterPrototype.Network
             public float velX;
             public float velY;
             public float velZ;
+            public float moveInputX;
+            public float moveInputZ;
             public int sampleTick;
             public long sampleTimeMs;
             public float shotOriginX;

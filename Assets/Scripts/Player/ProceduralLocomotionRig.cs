@@ -71,6 +71,7 @@ namespace ShooterPrototype.Player
         [SerializeField] private float crouchLegShorten = 0.2f;
         [SerializeField] private float crouchTorsoFollowDrop = 0.08f;
         [SerializeField] private float crouchLineDropY = 0.2f;
+        [SerializeField] private bool disableProceduralVisuals;
         [SerializeField] private bool useNetworkState;
         [SerializeField] private bool debugArmJitterLogs;
         [SerializeField] private float debugLogInterval = 0.5f;
@@ -105,6 +106,8 @@ namespace ShooterPrototype.Player
         private bool useExplicitNetworkAnimation;
         private float explicitNetworkSpeed01;
         private float networkLookPitch;
+        private float networkMoveInputX;
+        private float networkMoveInputZ;
         private float smoothedLookPitchShoulder;
         private float lookPitchShoulderVelocity;
         private Vector3 networkWorldVelocity;
@@ -129,6 +132,16 @@ namespace ShooterPrototype.Player
         public float CurrentSpeed01 => currentSpeed01;
         public bool CurrentGrounded => currentGrounded;
         public int CurrentJumpState => currentJumpState;
+        public bool NetworkCrouching => networkCrouching;
+        public bool NetworkSprinting => networkSprinting;
+        public float NetworkLookPitch => networkLookPitch;
+        public float NetworkMoveInputX => networkMoveInputX;
+        public float NetworkMoveInputZ => networkMoveInputZ;
+
+        public void SetProceduralVisualsEnabled(bool enabled)
+        {
+            disableProceduralVisuals = !enabled;
+        }
 
         public float GetNetworkAnimSpeed01()
         {
@@ -239,6 +252,13 @@ namespace ShooterPrototype.Player
         public void SetNetworkLookPitch(float lookPitch)
         {
             networkLookPitch = lookPitch;
+        }
+
+        public void SetNetworkMoveInput(float moveInputX, float moveInputZ)
+        {
+            useNetworkState = true;
+            networkMoveInputX = Mathf.Clamp(moveInputX, -1f, 1f);
+            networkMoveInputZ = Mathf.Clamp(moveInputZ, -1f, 1f);
         }
 
         public void SetNetworkDiscreteState(
@@ -454,6 +474,22 @@ namespace ShooterPrototype.Player
                 Mathf.Max(0.01f, crouchTransitionSmoothTime));
 
             var torsoFollowDrop = crouchTorsoFollowDrop * crouchBlend;
+
+            currentSpeed01 = motionSpeed01;
+            currentGrounded = grounded;
+            currentJumpState = grounded
+                ? 0
+                : (useNetworkState
+                    ? networkJumpState
+                    : (fpsController != null && fpsController.VerticalVelocity > 0.05f ? 1 : 2));
+            lastRootWorldPos = rootTransform.position;
+
+            if (disableProceduralVisuals)
+            {
+                EmitDebugArmJitterLog(motionSpeed01, smoothTime);
+                return;
+            }
+
             rootTransform.localPosition = baseRootLocalPos + Vector3.down * (crouchRootDrop * crouchBlend);
             shoulderAnchor.localPosition = baseShoulderLocalPos + new Vector3(0f, bob - landImpulse - crouchShoulderDrop * crouchBlend - torsoFollowDrop, 0f);
             ApplyHipLookPitchToShoulder(dt);
@@ -513,15 +549,6 @@ namespace ShooterPrototype.Player
 
             UpdateLegCurve(leftLegLine, hipAnchor.position, leftFootTarget.position, -1f);
             UpdateLegCurve(rightLegLine, hipAnchor.position, rightFootTarget.position, 1f);
-
-            currentSpeed01 = motionSpeed01;
-            currentGrounded = grounded;
-            currentJumpState = grounded
-                ? 0
-                : (useNetworkState
-                    ? networkJumpState
-                    : (fpsController != null && fpsController.VerticalVelocity > 0.05f ? 1 : 2));
-            lastRootWorldPos = rootTransform.position;
 
             EmitDebugArmJitterLog(motionSpeed01, smoothTime);
         }

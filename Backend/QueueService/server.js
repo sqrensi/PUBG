@@ -1231,7 +1231,7 @@ function encodeSnapshotBinary(payload) {
     const chunks = [];
     const header = Buffer.alloc(11);
     header.write("RTS1", 0, 4, "ascii");
-    header.writeUInt8(2, 4);
+    header.writeUInt8(3, 4);
     header.writeUInt32LE(payload.serverTick >>> 0, 5);
     header.writeUInt16LE(payload.serverTickRate >>> 0, 9);
     chunks.push(header);
@@ -1280,7 +1280,7 @@ function encodeSnapshotBinary(payload) {
       body.writeUInt8(Math.max(0, Math.min(2, player.jumpState || 0)), 34);
       chunks.push(body);
 
-      const meta = Buffer.alloc(72);
+      const meta = Buffer.alloc(80);
       meta.writeFloatLE(player.lookPitch || 0, 0);
       meta.writeUInt32LE((player.shotSeq || 0) >>> 0, 4);
       meta.writeUInt32LE((player.reloadSeq || 0) >>> 0, 8);
@@ -1299,6 +1299,8 @@ function encodeSnapshotBinary(payload) {
       meta.writeFloatLE(player.shotDirX || 0, 60);
       meta.writeFloatLE(player.shotDirY || 0, 64);
       meta.writeFloatLE(player.shotDirZ || 0, 68);
+      meta.writeFloatLE(player.moveInputX || 0, 72);
+      meta.writeFloatLE(player.moveInputZ || 0, 76);
       chunks.push(meta);
 
       const history = Array.isArray(player.history) ? player.history : [];
@@ -1453,6 +1455,8 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       velX: Number.isFinite(ticket.presence.velocityX) ? ticket.presence.velocityX : 0,
       velY: Number.isFinite(ticket.presence.velocityY) ? ticket.presence.velocityY : 0,
       velZ: Number.isFinite(ticket.presence.velocityZ) ? ticket.presence.velocityZ : 0,
+      moveInputX: ticket.inputState?.inputAuth ? normalizeNumber(ticket.inputState.moveInputX, 0) : 0,
+      moveInputZ: ticket.inputState?.inputAuth ? normalizeNumber(ticket.inputState.moveInputZ, 0) : 0,
       sampleTick: ticket.presence.sampleTick || currentServerTick,
       sampleTimeMs: ticket.presence.sampleTimeMs || ticket.presence.serverSampleTimeMs || Date.now(),
       history: getBroadcastStateHistory(ticket)

@@ -5,6 +5,12 @@ using UnityEngine.InputSystem;
 
 namespace ShooterPrototype.Player
 {
+    public enum WeaponWallCheckMode
+    {
+        CameraRay = 0,
+        WeaponCapsule = 1,
+    }
+
     [DefaultExecutionOrder(110)]
     public sealed class PlayerWeaponMount : MonoBehaviour
     {
@@ -30,6 +36,7 @@ namespace ShooterPrototype.Player
         [SerializeField] private float bobPositionY = 0.01f;
         [SerializeField] private float bobRotationZ = 3.2f;
         [SerializeField] private float bobSmoothing = 0.08f;
+        [SerializeField] private float walkBobFrequencyMultiplier = 1.22f;
         [SerializeField] private float idleFreezeSpeedThreshold = 0.015f;
         [SerializeField] private bool enableIdleSway = true;
         [SerializeField] private float idleSwaySpeed = 1.0f;
@@ -79,7 +86,7 @@ namespace ShooterPrototype.Player
         [SerializeField] private Vector3 sprintWeaponLocalEuler = new Vector3(3.18f, -57.1f, -20f);
         [SerializeField] private float sprintBlendSmoothTime = 0.14f;
         [SerializeField] private float sprintBobAmplitudeMultiplier = 1.7f;
-        [SerializeField] private float sprintBobFrequencyMultiplier = 1.65f;
+        [SerializeField] private float sprintBobFrequencyMultiplier = 0.82f;
         [SerializeField] private float sprintBobSmoothTime = 0.06f;
         [Header("Crouch")]
         [SerializeField] private float crouchWeaponDrop = 0.18f;
@@ -87,9 +94,13 @@ namespace ShooterPrototype.Player
         [SerializeField] private float crouchWeaponDropAdsMultiplier = 0.85f;
         [Header("Weapon Collision")]
         [SerializeField] private bool enableWeaponCollisionAvoidance = true;
+        [SerializeField] private WeaponWallCheckMode wallCheckMode = WeaponWallCheckMode.CameraRay;
+        [SerializeField] private bool localPlayerWallAvoidanceOnly = true;
+        [SerializeField] private bool useWeaponBlockLayerOnly = true;
+        [SerializeField] private string muzzleTargetName = "Muzzle";
         [SerializeField] private float wallCheckDistance = 0.95f;
         [SerializeField] private float wallCheckRadius = 0.09f;
-        [SerializeField] private LayerMask wallCheckMask = ~0;
+        [SerializeField] private LayerMask wallCheckMask;
         [SerializeField] private float wallPushBack = 0.46f;
         [SerializeField] private float wallPushUp = 0.05f;
         [SerializeField] private float wallTiltX = 24f;
@@ -121,6 +132,7 @@ namespace ShooterPrototype.Player
         private float adsBlend;
         private float adsBlendVelocity;
         private Transform sightTarget;
+        private Transform muzzleTransform;
         private Vector3 sightLocalPositionOnAnchor;
         private Quaternion sightLocalRotationOnAnchor = Quaternion.identity;
         private bool hasSightCalibration;
@@ -147,6 +159,9 @@ namespace ShooterPrototype.Player
         private Transform magHandTargetTransform;
         private Vector3 magHandTargetBaseLocalPos;
         private Coroutine reloadRoutine;
+        private bool handAttachedWeaponActive;
+        private bool firstPersonRigidHandIk;
+        private SyntyWeaponHandBinder handBinder;
 
         private void Awake()
         {
@@ -156,7 +171,53 @@ namespace ShooterPrototype.Player
         public float AdsBlend => adsBlend;
         public float AdsFollowPitchDownLimit => adsFollowPitchDownLimit;
         public Transform MountedWeaponRoot => weaponInstance != null ? weaponInstance.transform : null;
+        public Transform WeaponAnchorTransform => weaponParent;
+        public Transform RightHandGripTarget => rightHandTargetTransform;
+        public Transform LeftHandGripTarget => leftHandTargetTransform;
         public float CurrentWallAvoidBlend => Mathf.Clamp01(wallAvoidBlend);
+
+        public void SetHandAttachedWeaponActive(bool active)
+        {
+            handAttachedWeaponActive = active;
+        }
+
+        public void ConfigureWeaponParent(Transform parent, Transform pivot = null)
+        {
+            if (parent != null)
+            {
+                weaponParent = parent;
+            }
+
+            if (pivot != null)
+            {
+                cameraPivot = pivot;
+            }
+
+            if (weaponInstance != null && weaponParent != null &&
+                weaponInstance.transform.parent != weaponParent)
+            {
+                weaponInstance.transform.SetParent(weaponParent, true);
+            }
+        }
+
+        public void SetFirstPersonRigidHandIk(bool enabled)
+        {
+            if (firstPersonRigidHandIk == enabled)
+            {
+                return;
+            }
+
+            firstPersonRigidHandIk = enabled;
+            if (enabled)
+            {
+                smoothedPitchOffset = 0f;
+                smoothedPitchYawOffset = 0f;
+                pitchRotationVelocity = 0f;
+                pitchYawVelocity = 0f;
+                bobPositionVelocity = Vector3.zero;
+                bobRotationVelocity = 0f;
+            }
+        }
 
         public bool PlayReloadAnimation(float durationSeconds)
         {
@@ -234,8 +295,21 @@ namespace ShooterPrototype.Player
 
         private void LateUpdate()
         {
+            if (handBinder == null)
+            {
+                handBinder = GetComponent<SyntyWeaponHandBinder>();
+            }
+
+            handBinder?.SyncFirstPersonRigidHandIkMode();
+
             if (weaponInstance == null)
             {
+                return;
+            }
+
+            if (handAttachedWeaponActive && !useNetworkState)
+            {
+                UpdateAdsCameraZoom();
                 return;
             }
 
@@ -409,26 +483,47 @@ namespace ShooterPrototype.Player
                 }
                 ApplyWallAvoidance(ref targetAnchorLocalPosition, ref targetAnchorLocalRotation, wallTargetBlend);
 
-                weaponParent.localPosition = Vector3.SmoothDamp(
-                    weaponParent.localPosition,
-                    targetAnchorLocalPosition,
-                    ref anchorPositionVelocity,
-                    smooth);
+                var rigidAnchorFollow = firstPersonRigidHandIk &&
+                                        !useNetworkState &&
+                                        hipLockToCameraPivot &&
+                                        adsBlend < 0.001f &&
+                                        sprintBlend < 0.001f;
 
-                var currentAnchorEuler = weaponParent.localRotation.eulerAngles;
-                var targetAnchorEuler = targetAnchorLocalRotation.eulerAngles;
-                var smoothedAnchorX = Mathf.SmoothDampAngle(currentAnchorEuler.x, targetAnchorEuler.x, ref anchorRotXVelocity, smooth);
-                var smoothedAnchorY = Mathf.SmoothDampAngle(currentAnchorEuler.y, targetAnchorEuler.y, ref anchorRotYVelocity, smooth);
-                var smoothedAnchorZ = Mathf.SmoothDampAngle(currentAnchorEuler.z, targetAnchorEuler.z, ref anchorRotZVelocity, smooth);
-                weaponParent.localRotation = Quaternion.Euler(smoothedAnchorX, smoothedAnchorY, smoothedAnchorZ);
+                if (rigidAnchorFollow)
+                {
+                    weaponParent.localPosition = targetAnchorLocalPosition;
+                    weaponParent.localRotation = targetAnchorLocalRotation;
+                    anchorPositionVelocity = Vector3.zero;
+                    anchorRotXVelocity = 0f;
+                    anchorRotYVelocity = 0f;
+                    anchorRotZVelocity = 0f;
+                }
+                else
+                {
+                    weaponParent.localPosition = Vector3.SmoothDamp(
+                        weaponParent.localPosition,
+                        targetAnchorLocalPosition,
+                        ref anchorPositionVelocity,
+                        smooth);
+
+                    var currentAnchorEuler = weaponParent.localRotation.eulerAngles;
+                    var targetAnchorEuler = targetAnchorLocalRotation.eulerAngles;
+                    var smoothedAnchorX = Mathf.SmoothDampAngle(currentAnchorEuler.x, targetAnchorEuler.x, ref anchorRotXVelocity, smooth);
+                    var smoothedAnchorY = Mathf.SmoothDampAngle(currentAnchorEuler.y, targetAnchorEuler.y, ref anchorRotYVelocity, smooth);
+                    var smoothedAnchorZ = Mathf.SmoothDampAngle(currentAnchorEuler.z, targetAnchorEuler.z, ref anchorRotZVelocity, smooth);
+                    weaponParent.localRotation = Quaternion.Euler(smoothedAnchorX, smoothedAnchorY, smoothedAnchorZ);
+                }
             }
 
+            var rigidHandViewModel = firstPersonRigidHandIk && !useNetworkState;
             var isHipCameraFollow = hipLockToCameraPivot && cameraPivot != null && !useNetworkState
                 && adsPitchFollowBlend < 0.001f && sprintBlend < 0.001f;
             var isAdsCameraFollow = adsPitchFollowBlend > 0.001f && cameraPivot != null && (adsUseSightLock || adsLockToCameraPivot);
             var isCameraLocked = isHipCameraFollow || isAdsCameraFollow;
+            var suppressLocomotionBob = isAdsCameraFollow;
             var hipPitchInfluence = 1f - adsPitchFollowBlend;
-            if (hipLockToCameraPivot && !useNetworkState && adsPitchFollowBlend < 0.001f && sprintBlend < 0.001f)
+            if ((hipLockToCameraPivot && !useNetworkState && adsPitchFollowBlend < 0.001f && sprintBlend < 0.001f) ||
+                rigidHandViewModel)
             {
                 // Hip camera lock handles pitch on the anchor; skip extra hip arc/tilt on the model.
                 hipPitchInfluence = 0f;
@@ -439,10 +534,10 @@ namespace ShooterPrototype.Player
                 hipPitchInfluence = 0f;
             }
 
-            var bobPosAmount = isCameraLocked
+            var bobPosAmount = suppressLocomotionBob
                 ? 0f
                 : amount * Mathf.Lerp(1f, Mathf.Clamp01(adsBobPositionMultiplier), adsBlend);
-            var bobRotAmount = isCameraLocked
+            var bobRotAmount = suppressLocomotionBob
                 ? 0f
                 : amount * Mathf.Lerp(1f, Mathf.Clamp01(adsBobRotationMultiplier), adsBlend);
             if (sprintBlend > 0.0001f)
@@ -452,18 +547,22 @@ namespace ShooterPrototype.Player
                 bobRotAmount *= sprintAmp;
             }
 
+            var crouchBobScale = 1f - Mathf.Clamp01(crouchBlend);
+            bobPosAmount *= crouchBobScale;
+            bobRotAmount *= crouchBobScale;
+
             var idleSwayAmount = 0f;
-            if (enableIdleSway && !isCameraLocked && sprintBlend < 0.95f)
+            if (enableIdleSway && !isCameraLocked && !rigidHandViewModel && sprintBlend < 0.95f && crouchBobScale > 0.05f)
             {
                 var threshold = Mathf.Max(0.001f, idleFreezeSpeedThreshold * 2f);
                 idleSwayAmount = Mathf.Clamp01((threshold - amount) / threshold) *
                                    (1f - Mathf.Clamp01(adsBlend)) *
                                    (1f - sprintBlend);
             }
-            if (sprintBlend > 0.0001f)
-            {
-                phase *= Mathf.Lerp(1f, Mathf.Max(1f, sprintBobFrequencyMultiplier), sprintBlend);
-            }
+
+            var walkFreq = Mathf.Max(0.1f, walkBobFrequencyMultiplier);
+            var sprintFreq = Mathf.Clamp(sprintBobFrequencyMultiplier, 0.1f, 2f);
+            phase *= Mathf.Lerp(walkFreq, sprintFreq, sprintBlend);
             var idlePhase = Time.unscaledTime * Mathf.Max(0.1f, idleSwaySpeed);
 
             var targetPos = baseLocalPosition;
@@ -516,7 +615,10 @@ namespace ShooterPrototype.Player
 
             var targetPitchOffset = 0f;
             var targetYawOffset = 0f;
-            if (enableCameraPitchTilt && cameraPivot != null && hipPitchInfluence > 0.0001f)
+            if (!rigidHandViewModel &&
+                enableCameraPitchTilt &&
+                cameraPivot != null &&
+                hipPitchInfluence > 0.0001f)
             {
                 var pitch = useNetworkState
                     ? networkLookPitch
@@ -557,29 +659,57 @@ namespace ShooterPrototype.Player
                 }
             }
             var pitchSmooth = Mathf.Max(0.01f, cameraPitchSmoothing);
-            smoothedPitchOffset = Mathf.SmoothDampAngle(
-                smoothedPitchOffset,
-                targetPitchOffset,
-                ref pitchRotationVelocity,
-                pitchSmooth);
-            smoothedPitchYawOffset = Mathf.SmoothDampAngle(
-                smoothedPitchYawOffset,
-                targetYawOffset,
-                ref pitchYawVelocity,
-                pitchSmooth);
-
-            weaponInstance.transform.localPosition = smoothedPos;
-            if (wallAvoidBlend > 0.05f)
+            if (rigidHandViewModel)
             {
-                var localPos = weaponInstance.transform.localPosition;
-                localPos.z = Mathf.Min(localPos.z, baseLocalPosition.z);
-                weaponInstance.transform.localPosition = localPos;
+                smoothedPitchOffset = 0f;
+                smoothedPitchYawOffset = 0f;
+                pitchRotationVelocity = 0f;
+                pitchYawVelocity = 0f;
+            }
+            else
+            {
+                smoothedPitchOffset = Mathf.SmoothDampAngle(
+                    smoothedPitchOffset,
+                    targetPitchOffset,
+                    ref pitchRotationVelocity,
+                    pitchSmooth);
+                smoothedPitchYawOffset = Mathf.SmoothDampAngle(
+                    smoothedPitchYawOffset,
+                    targetYawOffset,
+                    ref pitchYawVelocity,
+                    pitchSmooth);
             }
 
-            weaponInstance.transform.localRotation = Quaternion.Euler(
-                baseLocalRotation.eulerAngles.x + smoothedPitchOffset,
-                baseLocalRotation.eulerAngles.y + smoothedPitchYawOffset,
-                smoothedZ);
+            if (rigidHandViewModel)
+            {
+                weaponInstance.transform.localPosition = smoothedPos;
+                if (wallAvoidBlend > 0.05f)
+                {
+                    var localPos = weaponInstance.transform.localPosition;
+                    localPos.z = Mathf.Min(localPos.z, baseLocalPosition.z);
+                    weaponInstance.transform.localPosition = localPos;
+                }
+
+                weaponInstance.transform.localRotation = Quaternion.Euler(
+                    baseLocalRotation.eulerAngles.x,
+                    baseLocalRotation.eulerAngles.y,
+                    smoothedZ);
+            }
+            else
+            {
+                weaponInstance.transform.localPosition = smoothedPos;
+                if (wallAvoidBlend > 0.05f)
+                {
+                    var localPos = weaponInstance.transform.localPosition;
+                    localPos.z = Mathf.Min(localPos.z, baseLocalPosition.z);
+                    weaponInstance.transform.localPosition = localPos;
+                }
+
+                weaponInstance.transform.localRotation = Quaternion.Euler(
+                    baseLocalRotation.eulerAngles.x + smoothedPitchOffset,
+                    baseLocalRotation.eulerAngles.y + smoothedPitchYawOffset,
+                    smoothedZ);
+            }
         }
 
         private void EnsureWeaponMounted()
@@ -669,6 +799,12 @@ namespace ShooterPrototype.Player
             }
 
             sightTarget = FindSightTarget(weaponInstance.transform);
+            muzzleTransform = FindChildRecursive(weaponInstance.transform, muzzleTargetName);
+            if (muzzleTransform == null)
+            {
+                muzzleTransform = FindChildRecursive(weaponInstance.transform, "Muzzle");
+            }
+
             if (weaponParent != null && sightTarget != null)
             {
                 sightLocalPositionOnAnchor = weaponParent.InverseTransformPoint(sightTarget.position);
@@ -904,34 +1040,237 @@ namespace ShooterPrototype.Player
 
         private float ComputeWallAvoidanceTargetBlend()
         {
-            if (!enableWeaponCollisionAvoidance || cameraPivot == null)
+            if (!enableWeaponCollisionAvoidance ||
+                (localPlayerWallAvoidanceOnly && useNetworkState) ||
+                cameraPivot == null)
             {
                 return 0f;
             }
 
-            var checkPoint = GetWeaponWallCheckPoint();
+            return wallCheckMode == WeaponWallCheckMode.CameraRay
+                ? ComputeCameraRayWallAvoidBlend()
+                : ComputeWeaponCapsuleWallAvoidBlend();
+        }
+
+        private float ComputeCameraRayWallAvoidBlend()
+        {
+            var direction = cameraPivot.forward;
+            var distance = Mathf.Max(0.05f, wallCheckDistance);
+            var layerMask = GetWallTraceLayerMask();
+            if (layerMask == 0)
+            {
+                return 0f;
+            }
+
+            var origin = cameraPivot.position;
+            var hits = Physics.RaycastAll(
+                origin,
+                direction,
+                distance,
+                layerMask,
+                QueryTriggerInteraction.Ignore);
+            var bestBlend = 0f;
+            for (var i = 0; i < hits.Length; i++)
+            {
+                var hit = hits[i];
+                if (!IsValidCameraRayWallHit(hit.collider))
+                {
+                    continue;
+                }
+
+                bestBlend = Mathf.Max(bestBlend, ComputeWallAvoidBlend(hit.distance, distance));
+            }
+
+            return bestBlend;
+        }
+
+        private float ComputeWeaponCapsuleWallAvoidBlend()
+        {
             var direction = cameraPivot.forward;
             var distance = Mathf.Max(0.05f, wallCheckDistance);
             var radius = Mathf.Max(0.01f, wallCheckRadius);
-            var castOrigin = checkPoint - direction * radius;
-            var castDistance = distance + radius;
-
-            if (Physics.SphereCast(
-                    castOrigin,
-                    radius,
-                    direction,
-                    out var hit,
-                    castDistance,
-                    wallCheckMask,
-                    QueryTriggerInteraction.Ignore) &&
-                !IsOwnedCollider(hit.collider))
+            var layerMask = GetWallTraceLayerMask();
+            if (layerMask == 0)
             {
-                var surfaceDistance = Mathf.Max(0f, hit.distance - radius);
-                return ComputeWallAvoidBlend(surfaceDistance, distance);
+                return 0f;
             }
 
-            // Flush against wall: cast can miss when the probe is already inside geometry.
-            return ComputeOverlapWallBlend(checkPoint, radius);
+            GetWeaponTraceCapsule(out var capsuleStart, out var capsuleEnd, direction);
+            var castDistance = distance + radius;
+            var bestBlend = 0f;
+
+            var castHits = Physics.CapsuleCastAll(
+                capsuleStart,
+                capsuleEnd,
+                radius,
+                direction,
+                castDistance,
+                layerMask,
+                QueryTriggerInteraction.Ignore);
+            for (var i = 0; i < castHits.Length; i++)
+            {
+                var hit = castHits[i];
+                if (!IsValidWeaponTraceHit(hit.collider))
+                {
+                    continue;
+                }
+
+                var surfaceDistance = Mathf.Max(0f, hit.distance - radius);
+                bestBlend = Mathf.Max(bestBlend, ComputeWallAvoidBlend(surfaceDistance, distance));
+            }
+
+            bestBlend = Mathf.Max(
+                bestBlend,
+                ComputeOverlapCapsuleWallBlend(capsuleStart, capsuleEnd, radius, direction));
+            return bestBlend;
+        }
+
+        private int GetWallTraceLayerMask()
+        {
+            if (wallCheckMode == WeaponWallCheckMode.CameraRay)
+            {
+                return wallCheckMask.value != 0 ? wallCheckMask.value : Physics.DefaultRaycastLayers;
+            }
+
+            if (useWeaponBlockLayerOnly && WeaponBlockLayers.IsConfigured)
+            {
+                return WeaponBlockLayers.Mask;
+            }
+
+            return wallCheckMask.value != 0 ? wallCheckMask.value : WeaponBlockLayers.Mask;
+        }
+
+        private void GetWeaponTraceCapsule(out Vector3 capsuleStart, out Vector3 capsuleEnd, Vector3 fallbackDirection)
+        {
+            capsuleStart = cameraPivot.position;
+            capsuleEnd = GetMuzzleWorldPosition(fallbackDirection);
+
+            var minimumLength = 0.12f;
+            if ((capsuleEnd - capsuleStart).sqrMagnitude < minimumLength * minimumLength)
+            {
+                var direction = fallbackDirection.sqrMagnitude > 0.0001f
+                    ? fallbackDirection.normalized
+                    : Vector3.forward;
+                capsuleEnd = capsuleStart + direction * minimumLength;
+            }
+        }
+
+        private Vector3 GetMuzzleWorldPosition(Vector3 fallbackDirection)
+        {
+            if (muzzleTransform == null && weaponInstance != null)
+            {
+                muzzleTransform = FindChildRecursive(weaponInstance.transform, muzzleTargetName);
+                if (muzzleTransform == null)
+                {
+                    muzzleTransform = FindChildRecursive(weaponInstance.transform, "Muzzle");
+                }
+            }
+
+            if (muzzleTransform != null)
+            {
+                return muzzleTransform.position;
+            }
+
+            return GetWeaponWallCheckPoint() + fallbackDirection.normalized * 0.45f;
+        }
+
+        private float ComputeOverlapCapsuleWallBlend(
+            Vector3 capsuleStart,
+            Vector3 capsuleEnd,
+            float radius,
+            Vector3 castDirection)
+        {
+            var layerMask = GetWallTraceLayerMask();
+            if (layerMask == 0)
+            {
+                return 0f;
+            }
+
+            var hits = Physics.OverlapCapsule(
+                capsuleStart,
+                capsuleEnd,
+                radius,
+                layerMask,
+                QueryTriggerInteraction.Ignore);
+            var bestBlend = 0f;
+            var probeCenter = (capsuleStart + capsuleEnd) * 0.5f;
+
+            for (var i = 0; i < hits.Length; i++)
+            {
+                var hitCollider = hits[i];
+                if (!IsValidWeaponTraceHit(hitCollider))
+                {
+                    continue;
+                }
+
+                if (TryGetWallProbePenetration(hitCollider, probeCenter, radius, castDirection, out var penetration))
+                {
+                    bestBlend = Mathf.Max(bestBlend, Mathf.Clamp01(penetration / radius));
+                }
+            }
+
+            if (bestBlend <= 0f)
+            {
+                return 0f;
+            }
+
+            return Mathf.Clamp01(Mathf.Max(Mathf.Clamp01(wallAvoidMinBlendOnHit), bestBlend));
+        }
+
+        private bool IsValidCameraRayWallHit(Collider collider)
+        {
+            return collider != null &&
+                   collider.enabled &&
+                   !collider.isTrigger &&
+                   !IsOwnedCollider(collider) &&
+                   !IsCharacterCollider(collider);
+        }
+
+        private bool IsValidWeaponTraceHit(Collider collider)
+        {
+            return collider != null &&
+                   !IsOwnedCollider(collider) &&
+                   IsWeaponTraceCollider(collider);
+        }
+
+        private static bool IsCharacterCollider(Collider collider)
+        {
+            if (collider == null)
+            {
+                return false;
+            }
+
+            if (collider.GetComponentInParent<CharacterController>(true) != null ||
+                collider.GetComponentInParent<FpsCharacterController>(true) != null ||
+                collider.GetComponentInParent<PlayerLineHitboxRig>(true) != null)
+            {
+                return true;
+            }
+
+            var root = collider.transform.root;
+            if (root == null)
+            {
+                return false;
+            }
+
+            var rootName = root.name;
+            return rootName.IndexOf("Player", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   rootName.IndexOf("Remote_", System.StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsWeaponTraceCollider(Collider collider)
+        {
+            if (collider == null || !collider.enabled || collider.isTrigger)
+            {
+                return false;
+            }
+
+            if (collider is MeshCollider)
+            {
+                return false;
+            }
+
+            return collider is BoxCollider or SphereCollider or CapsuleCollider;
         }
 
         private Vector3 GetWeaponWallCheckPoint()
@@ -957,33 +1296,33 @@ namespace ShooterPrototype.Player
             return Vector3.Lerp(hipWorld, adsWorld, adsBlend);
         }
 
-        private float ComputeOverlapWallBlend(Vector3 center, float radius)
+        private static bool TryGetWallProbePenetration(
+            Collider collider,
+            Vector3 center,
+            float radius,
+            Vector3 castDirection,
+            out float penetration)
         {
-            var hits = Physics.OverlapSphere(center, radius, wallCheckMask, QueryTriggerInteraction.Ignore);
-            var bestBlend = 0f;
-            for (var i = 0; i < hits.Length; i++)
+            penetration = 0f;
+            if (collider == null || !collider.enabled || !IsWeaponTraceCollider(collider))
             {
-                if (IsOwnedCollider(hits[i]))
-                {
-                    continue;
-                }
-
-                var closest = hits[i].ClosestPoint(center);
-                var penetration = radius - Vector3.Distance(center, closest);
-                if (penetration <= 0.001f)
-                {
-                    continue;
-                }
-
-                bestBlend = Mathf.Max(bestBlend, Mathf.Clamp01(penetration / radius));
+                return false;
             }
 
-            if (bestBlend <= 0f)
+            var closest = collider.ClosestPoint(center);
+            penetration = radius - Vector3.Distance(center, closest);
+            if (penetration > 0.001f)
             {
-                return 0f;
+                return true;
             }
 
-            return Mathf.Clamp01(Mathf.Max(Mathf.Clamp01(wallAvoidMinBlendOnHit), bestBlend));
+            if (!collider.bounds.Contains(center))
+            {
+                return false;
+            }
+
+            penetration = radius;
+            return true;
         }
 
         private float ComputeWallAvoidBlend(float surfaceDistance, float maxDistance)

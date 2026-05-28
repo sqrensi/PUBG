@@ -12,6 +12,11 @@ namespace ShooterPrototype.Player
         [SerializeField] private string armNameContains = "Thread";
         [SerializeField] private string weaponNameContains = "Weapon";
 
+        public bool IsLocalPlayerView => isLocalPlayer;
+        public bool UsesSingleModelForFirstPerson => useSingleModelForFirstPerson;
+        public GameObject FirstPersonViewRoot => firstPersonRoot;
+        public GameObject ThirdPersonBodyRoot => thirdPersonRoot;
+
         public void ConfigureRoots(GameObject firstPerson, GameObject thirdPerson)
         {
             firstPersonRoot = firstPerson;
@@ -24,12 +29,26 @@ namespace ShooterPrototype.Player
             ApplyViewMode();
         }
 
+        public void ConfigureSplitView(GameObject firstPerson, GameObject thirdPerson, bool localPlayer)
+        {
+            firstPersonRoot = firstPerson;
+            thirdPersonRoot = thirdPerson;
+            useSingleModelForFirstPerson = false;
+            isLocalPlayer = localPlayer;
+            ApplyViewMode();
+        }
+
         public void RefreshViewMode()
         {
             ApplyViewMode();
         }
 
         private void Awake()
+        {
+            ApplyViewMode();
+        }
+
+        private void Start()
         {
             ApplyViewMode();
         }
@@ -45,6 +64,19 @@ namespace ShooterPrototype.Player
 
                 thirdPersonRoot.SetActive(true);
                 ApplySingleModelVisibility();
+                return;
+            }
+
+            var splitBody = GetComponent<SyntySplitBodyPresentation>();
+            if (splitBody != null && thirdPersonRoot != null)
+            {
+                if (firstPersonRoot != null)
+                {
+                    firstPersonRoot.SetActive(isLocalPlayer);
+                }
+
+                thirdPersonRoot.SetActive(true);
+                splitBody.ApplyViewMode();
                 return;
             }
 
@@ -65,6 +97,12 @@ namespace ShooterPrototype.Player
             {
                 return;
             }
+
+            var syntyBinder = GetComponent<SyntyCharacterVisualBinder>();
+            var armsPresenter = GetComponent<SyntyFirstPersonArmsPresenter>();
+            var localFirstPersonView = isLocalPlayer;
+            armsPresenter?.ApplyFirstPersonVisibility(localFirstPersonView);
+            DisableStaleFirstPersonArmsRenderers(armsPresenter);
 
             var renderers = thirdPersonRoot.GetComponentsInChildren<Renderer>(true);
             foreach (var renderer in renderers)
@@ -88,6 +126,18 @@ namespace ShooterPrototype.Player
                     continue;
                 }
 
+                if (syntyBinder != null && syntyBinder.ShouldHideSourceBodyInFirstPerson(renderer))
+                {
+                    renderer.enabled = false;
+                    continue;
+                }
+
+                if (armsPresenter != null && armsPresenter.IsFirstPersonArmsRenderer(renderer))
+                {
+                    renderer.enabled = true;
+                    continue;
+                }
+
                 var objectName = renderer.gameObject.name;
                 renderer.enabled = IsFirstPersonVisibleRenderer(renderer.transform, objectName);
             }
@@ -98,6 +148,26 @@ namespace ShooterPrototype.Player
             var syntyBinder = GetComponent<SyntyCharacterVisualBinder>();
             if (syntyBinder != null)
             {
+                if (syntyBinder.IsRendererUnderSyntyVisual(rendererTransform))
+                {
+                    if (syntyBinder.ShowSyntyMeshInFirstPerson)
+                    {
+                        return true;
+                    }
+
+                    if (syntyBinder.ShouldHideRendererInFirstPerson(objectName, rendererTransform))
+                    {
+                        return false;
+                    }
+
+                    if (syntyBinder.ShouldShowRendererInFirstPerson(objectName, rendererTransform))
+                    {
+                        return true;
+                    }
+
+                    return false;
+                }
+
                 if (syntyBinder.ShouldHideRendererInFirstPerson(objectName, rendererTransform))
                 {
                     return false;
@@ -137,6 +207,30 @@ namespace ShooterPrototype.Player
             }
 
             return false;
+        }
+
+        private void DisableStaleFirstPersonArmsRenderers(SyntyFirstPersonArmsPresenter armsPresenter)
+        {
+            if (thirdPersonRoot == null)
+            {
+                return;
+            }
+
+            var renderers = thirdPersonRoot.GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer == null ||
+                    !renderer.gameObject.name.EndsWith("_FirstPersonArms", System.StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (armsPresenter == null || !armsPresenter.IsFirstPersonArmsRenderer(renderer))
+                {
+                    renderer.enabled = false;
+                }
+            }
         }
     }
 }

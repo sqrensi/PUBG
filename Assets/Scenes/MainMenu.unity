@@ -951,6 +951,7 @@ MonoBehaviour:
   overrideLaunchMode: 0
   keepAliveAcrossScenes: 1
   runClientInBackground: 1
+  performancePreset: {fileID: 0}
   networkConfig: {fileID: 11400000, guid: 68ca251f57d2735469237e2c29584d69, type: 2}
   networkLauncher: {fileID: 1237708887}
   createRuntimeQueueApiClient: 1
@@ -972,8 +973,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ShooterPrototype.Player.PlayerSpawnManager
   gameSceneName: Game
-  playerPrefab: {fileID: 4673309244235424808, guid: bc9a6079647017a4c9931c852d09bfac, type: 3}
-  remotePlayerPrefab: {fileID: 0}
+  playerPrefab: {fileID: 7831688931865325460, guid: dc0216bb95f205842b2047a8e89fddec, type: 3}
+  remotePlayerPrefab: {fileID: 6931534016456997890, guid: 267d625ca484c5243b00dd15c5879dff, type: 3}
   localPlayerObjectName: LocalPlayer
   enableMatchPresenceSync: 1
   groundMask:

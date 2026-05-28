@@ -9,47 +9,154 @@ namespace ShooterPrototype.EditorTools
 {
     public static class SyntyPlayerPrefabCreator
     {
-        private const string SourcePrefabPath = "Assets/Prefabs/Player/PlayerLocal.prefab";
+        private const string SourcePrefabPath = PlayerCleanPrefabCreator.TargetPrefabPath;
+        private const string LegacySourcePrefabPath = "Assets/Prefabs/Player/PlayerLocal.prefab";
+        private const string SettingsTemplatePrefabPath = "Assets/Prefabs/Player/PlayerSyntyHuman.prefab";
         private const string TargetPrefabPath = "Assets/Prefabs/Player/PlayerSyntyHuman.prefab";
+        private const string BusinessMaleTargetPrefabPath = "Assets/Prefabs/Player/PlayerSyntyBusinessMale.prefab";
+        private const string Ch18CharacterFbxPath = "Assets/Characters/Ch18_nonPBR.fbx";
+        private const string Ch18TargetPrefabPath = "Assets/Prefabs/Player/PlayerCh18.prefab";
+        internal const string Ch18CharacterFbxAssetPath = Ch18CharacterFbxPath;
         private const string SyntyCharactersFolder = "Assets/Synty/PolygonBattleRoyale/Prefabs/Characters";
         private const string DefaultSyntyCharacterPath =
-            "Assets/Synty/PolygonBattleRoyale/Prefabs/Characters/Character_MilitaryMale_01.prefab";
+            "Assets/Synty/PolygonBattleRoyale/Prefabs/Characters/Character_BusinessMale_01.prefab";
+        private const float TargetCharacterHeightMeters = 1.58f;
 
         [MenuItem("Shooter Prototype/Create/Synty Human Player Prefab")]
         public static void CreateOrUpdatePlayerPrefab()
         {
-            var sourcePrefab = AssetDatabase.LoadAssetAtPath<GameObject>(SourcePrefabPath);
-            if (sourcePrefab == null)
-            {
-                Debug.LogError($"[SyntyPlayerPrefabCreator] Source prefab not found: {SourcePrefabPath}");
-                return;
-            }
+            CreatePlayerPrefabFromTemplate(
+                ResolveTemplatePrefabPath(TargetPrefabPath),
+                TargetPrefabPath,
+                ResolveSyntyCharacterPrefab(DefaultSyntyCharacterPath),
+                "PlayerSyntyHuman");
+        }
 
-            var syntyCharacterPrefab = ResolveSyntyCharacterPrefab();
-            if (syntyCharacterPrefab == null)
+        [MenuItem("Shooter Prototype/Create/Player Synty Business Male Prefab")]
+        public static void CreateBusinessMalePlayerPrefab()
+        {
+            var characterPrefab = ResolveSyntyCharacterPrefab(DefaultSyntyCharacterPath);
+            if (characterPrefab == null)
             {
                 Debug.LogError(
-                    $"[SyntyPlayerPrefabCreator] No Synty character prefab found under {SyntyCharactersFolder}");
+                    $"[SyntyPlayerPrefabCreator] Character prefab not found: {DefaultSyntyCharacterPath}");
                 return;
             }
 
-            var instance = PrefabUtility.InstantiatePrefab(sourcePrefab) as GameObject;
+            CreatePlayerPrefabFromTemplate(
+                ResolveTemplatePrefabPath(SettingsTemplatePrefabPath),
+                BusinessMaleTargetPrefabPath,
+                characterPrefab,
+                "PlayerSyntyBusinessMale");
+        }
+
+        [MenuItem("Shooter Prototype/Create/Player Ch18 Prefab (Business Male settings)")]
+        public static void CreateCh18PlayerPrefab()
+        {
+            CreatePlayerPrefabFromFbx(
+                ResolveTemplatePrefabPath(BusinessMaleTargetPrefabPath),
+                Ch18TargetPrefabPath,
+                Ch18CharacterFbxPath,
+                "PlayerCh18");
+        }
+
+        public static void CreatePlayerPrefabFromFbx(
+            GameObject templatePrefab,
+            string targetPrefabPath,
+            string characterFbxPath,
+            string instanceName)
+        {
+            if (templatePrefab == null)
+            {
+                Debug.LogError("[SyntyPlayerPrefabCreator] Template prefab is missing.");
+                return;
+            }
+
+            var characterModel = AssetDatabase.LoadAssetAtPath<GameObject>(characterFbxPath);
+            if (characterModel == null)
+            {
+                Debug.LogError($"[SyntyPlayerPrefabCreator] Character FBX not found: {characterFbxPath}");
+                return;
+            }
+
+            var instance = PrefabUtility.InstantiatePrefab(templatePrefab) as GameObject;
             if (instance == null)
             {
-                Debug.LogError("[SyntyPlayerPrefabCreator] Failed to instantiate source prefab.");
+                Debug.LogError("[SyntyPlayerPrefabCreator] Failed to instantiate template prefab.");
                 return;
             }
 
             try
             {
-                instance.name = "PlayerSyntyHuman";
-                ConfigureHumanVisual(instance, syntyCharacterPrefab);
-                SaveTargetPrefab(instance);
+                instance.name = instanceName;
+                CleanupPlayerGeneratedContent(instance);
+                ConfigureFbxCharacterVisual(instance, characterModel, characterFbxPath);
+                SavePrefab(instance, targetPrefabPath);
             }
             finally
             {
                 Object.DestroyImmediate(instance);
             }
+        }
+
+        public static void CreatePlayerPrefabFromTemplate(
+            GameObject templatePrefab,
+            string targetPrefabPath,
+            GameObject syntyCharacterPrefab,
+            string instanceName)
+        {
+            if (templatePrefab == null)
+            {
+                Debug.LogError("[SyntyPlayerPrefabCreator] Template prefab is missing.");
+                return;
+            }
+
+            if (syntyCharacterPrefab == null)
+            {
+                Debug.LogError("[SyntyPlayerPrefabCreator] Synty character prefab is missing.");
+                return;
+            }
+
+            var instance = PrefabUtility.InstantiatePrefab(templatePrefab) as GameObject;
+            if (instance == null)
+            {
+                Debug.LogError("[SyntyPlayerPrefabCreator] Failed to instantiate template prefab.");
+                return;
+            }
+
+            try
+            {
+                instance.name = instanceName;
+                CleanupPlayerGeneratedContent(instance);
+                ConfigureHumanVisual(instance, syntyCharacterPrefab);
+                SavePrefab(instance, targetPrefabPath);
+            }
+            finally
+            {
+                Object.DestroyImmediate(instance);
+            }
+        }
+
+        private static GameObject ResolveTemplatePrefabPath(string preferredTemplatePath)
+        {
+            var preferred = AssetDatabase.LoadAssetAtPath<GameObject>(preferredTemplatePath);
+            if (preferred != null)
+            {
+                return preferred;
+            }
+
+            var clean = AssetDatabase.LoadAssetAtPath<GameObject>(SourcePrefabPath);
+            if (clean != null)
+            {
+                return clean;
+            }
+
+            return AssetDatabase.LoadAssetAtPath<GameObject>(LegacySourcePrefabPath);
+        }
+
+        internal static void EnsurePlayerPrefabFolder()
+        {
+            EnsureFolder("Assets/Prefabs/Player");
         }
 
         private static void ConfigureHumanVisual(GameObject playerRoot, GameObject syntyCharacterPrefab)
@@ -67,6 +174,14 @@ namespace ShooterPrototype.EditorTools
                 Object.DestroyImmediate(existingVisual.gameObject);
             }
 
+            CleanupGeneratedFirstPersonArms(thirdPersonBody);
+
+            var armsPresenter = playerRoot.GetComponent<SyntyFirstPersonArmsPresenter>();
+            if (armsPresenter != null)
+            {
+                armsPresenter.ResetForRebuild();
+            }
+
             var syntyInstance = PrefabUtility.InstantiatePrefab(syntyCharacterPrefab, thirdPersonBody) as GameObject;
             if (syntyInstance == null)
             {
@@ -78,7 +193,7 @@ namespace ShooterPrototype.EditorTools
             syntyInstance.transform.localPosition = Vector3.zero;
             syntyInstance.transform.localRotation = Quaternion.identity;
             syntyInstance.transform.localScale = Vector3.one;
-            ActivatePrimaryCharacterVariant(syntyInstance);
+            ActivatePrimaryCharacterVariant(syntyInstance, syntyCharacterPrefab.name);
 
             var binder = playerRoot.GetComponent<SyntyCharacterVisualBinder>();
             if (binder == null)
@@ -93,11 +208,19 @@ namespace ShooterPrototype.EditorTools
                 alignment.eulerOffset,
                 alignment.uniformScale);
 
+            var binderSerialized = new SerializedObject(binder);
+            binderSerialized.FindProperty("showSyntyMeshInFirstPerson").boolValue = false;
+            binderSerialized.FindProperty("showArmsOnlyInFirstPerson").boolValue = false;
+            binderSerialized.ApplyModifiedPropertiesWithoutUndo();
+            binder.ApplyMecanimMode();
+
+            SyntyAnimationSetup.WireMecanimComponents(playerRoot);
+
             var viewPresentation = playerRoot.GetComponent<PlayerViewPresentation>();
             if (viewPresentation != null)
             {
                 var viewSerialized = new SerializedObject(viewPresentation);
-                viewSerialized.FindProperty("armNameContains").stringValue = "Thread";
+                viewSerialized.FindProperty("armNameContains").stringValue = "Hand";
                 viewSerialized.FindProperty("weaponNameContains").stringValue = "Weapon";
                 viewSerialized.ApplyModifiedPropertiesWithoutUndo();
             }
@@ -110,14 +233,180 @@ namespace ShooterPrototype.EditorTools
 
             Debug.Log(
                 $"[SyntyPlayerPrefabCreator] Configured {playerRoot.name} with Synty prefab '{syntyCharacterPrefab.name}'.");
+            RestoreActiveCharacterMeshesForPrefabSave(playerRoot);
         }
 
-        private static GameObject ResolveSyntyCharacterPrefab()
+        public static void ConfigureFbxCharacterVisual(
+            GameObject playerRoot,
+            GameObject characterModel,
+            string characterFbxPath)
         {
-            var defaultPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(DefaultSyntyCharacterPath);
-            if (defaultPrefab != null)
+            var thirdPersonBody = FindChildRecursive(playerRoot.transform, "ThirdPersonBody");
+            if (thirdPersonBody == null)
             {
-                return defaultPrefab;
+                Debug.LogError("[SyntyPlayerPrefabCreator] ThirdPersonBody not found on source prefab.");
+                return;
+            }
+
+            var existingVisual = thirdPersonBody.Find("SyntyVisual");
+            if (existingVisual != null)
+            {
+                Object.DestroyImmediate(existingVisual.gameObject);
+            }
+
+            CleanupGeneratedFirstPersonArms(thirdPersonBody);
+
+            var armsPresenter = playerRoot.GetComponent<SyntyFirstPersonArmsPresenter>();
+            if (armsPresenter != null)
+            {
+                armsPresenter.ResetForRebuild();
+            }
+
+            var characterInstance = PrefabUtility.InstantiatePrefab(characterModel, thirdPersonBody) as GameObject;
+            if (characterInstance == null)
+            {
+                characterInstance = Object.Instantiate(characterModel, thirdPersonBody);
+            }
+
+            if (characterInstance == null)
+            {
+                Debug.LogError("[SyntyPlayerPrefabCreator] Failed to instantiate character FBX.");
+                return;
+            }
+
+            characterInstance.name = "SyntyVisual";
+            characterInstance.transform.localPosition = Vector3.zero;
+            characterInstance.transform.localRotation = Quaternion.identity;
+            characterInstance.transform.localScale = Vector3.one;
+
+            var primaryMeshName = ResolvePrimaryCharacterMeshName(characterInstance.transform, characterFbxPath);
+            ActivatePrimaryCharacterVariant(characterInstance, primaryMeshName);
+
+            var binder = playerRoot.GetComponent<SyntyCharacterVisualBinder>();
+            if (binder == null)
+            {
+                binder = playerRoot.AddComponent<SyntyCharacterVisualBinder>();
+            }
+
+            var alignment = ComputeAlignment(characterInstance.transform);
+            binder.Configure(
+                characterInstance.transform,
+                alignment.positionOffset,
+                alignment.eulerOffset,
+                alignment.uniformScale);
+
+            var binderSerialized = new SerializedObject(binder);
+            binderSerialized.FindProperty("showSyntyMeshInFirstPerson").boolValue = false;
+            binderSerialized.FindProperty("showArmsOnlyInFirstPerson").boolValue = false;
+            binderSerialized.ApplyModifiedPropertiesWithoutUndo();
+            binder.ApplyMecanimMode();
+
+            SyntyAnimationSetup.WireMecanimComponents(playerRoot);
+
+            var viewPresentation = playerRoot.GetComponent<PlayerViewPresentation>();
+            if (viewPresentation != null)
+            {
+                var viewSerialized = new SerializedObject(viewPresentation);
+                viewSerialized.FindProperty("armNameContains").stringValue = "Hand";
+                viewSerialized.FindProperty("weaponNameContains").stringValue = "Weapon";
+                viewSerialized.ApplyModifiedPropertiesWithoutUndo();
+            }
+
+            var headMask = playerRoot.GetComponent<PlayerHeadMaskSelector>();
+            if (headMask != null)
+            {
+                headMask.enabled = false;
+            }
+
+            Debug.Log(
+                $"[SyntyPlayerPrefabCreator] Configured {playerRoot.name} with FBX '{characterFbxPath}' (mesh '{primaryMeshName}').");
+            RestoreActiveCharacterMeshesForPrefabSave(playerRoot);
+        }
+
+        internal static void RestoreActiveCharacterMeshesForPrefabSave(GameObject playerRoot)
+        {
+            var thirdPersonBody = FindChildRecursive(playerRoot.transform, "ThirdPersonBody");
+            var syntyVisual = thirdPersonBody != null ? thirdPersonBody.Find("SyntyVisual") : null;
+            if (syntyVisual == null)
+            {
+                return;
+            }
+
+            ActivatePrimaryCharacterVariant(
+                syntyVisual.gameObject,
+                ResolvePrimaryCharacterMeshName(syntyVisual));
+        }
+
+        public static void CleanupPlayerGeneratedContent(GameObject playerRoot)
+        {
+            if (playerRoot == null)
+            {
+                return;
+            }
+
+            var thirdPersonBody = FindChildRecursive(playerRoot.transform, "ThirdPersonBody");
+            CleanupGeneratedFirstPersonArms(thirdPersonBody);
+
+            var armsPresenter = playerRoot.GetComponent<SyntyFirstPersonArmsPresenter>();
+            if (armsPresenter != null)
+            {
+                armsPresenter.ResetForRebuild();
+            }
+        }
+
+        public static void CleanupGeneratedFirstPersonArms(Transform thirdPersonBody)
+        {
+            if (thirdPersonBody == null)
+            {
+                return;
+            }
+
+            CleanupGeneratedFirstPersonArmsUnder(thirdPersonBody);
+
+            var playerRoot = thirdPersonBody.root;
+            var cameraPivot = playerRoot != null ? playerRoot.Find("CameraPivot") : null;
+            var firstPersonView = cameraPivot != null ? cameraPivot.Find("FirstPersonView") : null;
+            if (firstPersonView != null)
+            {
+                CleanupGeneratedFirstPersonArmsUnder(firstPersonView);
+            }
+        }
+
+        private static void CleanupGeneratedFirstPersonArmsUnder(Transform root)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            var generatedRoot = root.Find("GeneratedFirstPersonArms");
+            if (generatedRoot != null)
+            {
+                Object.DestroyImmediate(generatedRoot.gameObject);
+            }
+
+            var children = root.GetComponentsInChildren<Transform>(true);
+            for (var i = children.Length - 1; i >= 0; i--)
+            {
+                var child = children[i];
+                if (child == null || child == root)
+                {
+                    continue;
+                }
+
+                if (child.name.EndsWith("_FirstPersonArms", System.StringComparison.Ordinal))
+                {
+                    Object.DestroyImmediate(child.gameObject);
+                }
+            }
+        }
+
+        private static GameObject ResolveSyntyCharacterPrefab(string preferredCharacterPath)
+        {
+            var preferred = AssetDatabase.LoadAssetAtPath<GameObject>(preferredCharacterPath);
+            if (preferred != null)
+            {
+                return preferred;
             }
 
             if (!AssetDatabase.IsValidFolder(SyntyCharactersFolder))
@@ -143,7 +432,69 @@ namespace ShooterPrototype.EditorTools
             return AssetDatabase.LoadAssetAtPath<GameObject>(candidates[0]);
         }
 
-        private static void ActivatePrimaryCharacterVariant(GameObject syntyRoot)
+        internal static string ResolvePrimaryCharacterMeshName(Transform visualRoot, string sourceAssetPath = null)
+        {
+            var syntyName = ResolveSyntyCharacterName(visualRoot);
+            if (!string.IsNullOrEmpty(syntyName))
+            {
+                return syntyName;
+            }
+
+            if (!string.IsNullOrEmpty(sourceAssetPath))
+            {
+                var fileName = Path.GetFileNameWithoutExtension(sourceAssetPath);
+                var byFileName = FindSkinnedMeshByObjectName(visualRoot, fileName);
+                if (byFileName != null)
+                {
+                    return byFileName.gameObject.name;
+                }
+
+                var shortName = fileName.Split('_')[0];
+                if (!string.Equals(shortName, fileName, System.StringComparison.Ordinal))
+                {
+                    byFileName = FindSkinnedMeshByObjectName(visualRoot, shortName);
+                    if (byFileName != null)
+                    {
+                        return byFileName.gameObject.name;
+                    }
+                }
+            }
+
+            var best = FindBestBodySkinnedMesh(visualRoot);
+            return best != null ? best.gameObject.name : string.Empty;
+        }
+
+        internal static string ResolveSyntyCharacterName(Transform syntyVisual)
+        {
+            if (syntyVisual == null)
+            {
+                return string.Empty;
+            }
+
+            var prefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(syntyVisual.gameObject);
+            if (!string.IsNullOrEmpty(prefabPath))
+            {
+                var fileName = Path.GetFileNameWithoutExtension(prefabPath);
+                if (fileName.StartsWith("Character_", System.StringComparison.Ordinal))
+                {
+                    return fileName;
+                }
+            }
+
+            var source = PrefabUtility.GetCorrespondingObjectFromOriginalSource(syntyVisual.gameObject);
+            if (source != null)
+            {
+                var sourceName = source.name;
+                if (sourceName.StartsWith("Character_", System.StringComparison.Ordinal))
+                {
+                    return sourceName;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        internal static void ActivatePrimaryCharacterVariant(GameObject syntyRoot, string characterPrefabName)
         {
             var skinnedMeshes = syntyRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             if (skinnedMeshes.Length == 0)
@@ -151,25 +502,46 @@ namespace ShooterPrototype.EditorTools
                 return;
             }
 
-            var primary = skinnedMeshes
-                .OrderByDescending(r => r.sharedMesh != null ? r.sharedMesh.vertexCount : 0)
-                .First();
-            var primaryRoot = primary.transform;
-            while (primaryRoot.parent != null && primaryRoot.parent != syntyRoot.transform)
-            {
-                primaryRoot = primaryRoot.parent;
-            }
+            var characterKey = string.IsNullOrWhiteSpace(characterPrefabName)
+                ? string.Empty
+                : characterPrefabName.Replace(".prefab", string.Empty);
 
             foreach (var skinnedMesh in skinnedMeshes)
             {
-                var branchRoot = skinnedMesh.transform;
-                while (branchRoot.parent != null && branchRoot.parent != syntyRoot.transform)
+                if (skinnedMesh == null)
                 {
-                    branchRoot = branchRoot.parent;
+                    continue;
                 }
 
-                var shouldEnable = branchRoot == primaryRoot;
-                branchRoot.gameObject.SetActive(shouldEnable);
+                var meshObject = skinnedMesh.gameObject;
+                var meshObjectName = meshObject.name;
+                if (meshObjectName.EndsWith("_FirstPersonArms", System.StringComparison.Ordinal))
+                {
+                    meshObject.SetActive(false);
+                    continue;
+                }
+
+                if (meshObjectName.StartsWith("SM_Char_Attach", System.StringComparison.Ordinal))
+                {
+                    meshObject.SetActive(false);
+                    continue;
+                }
+
+                if (!meshObjectName.StartsWith("Character_", System.StringComparison.Ordinal) &&
+                    !meshObjectName.StartsWith("Ch", System.StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var shouldEnable = string.IsNullOrEmpty(characterKey) ||
+                                   string.Equals(meshObjectName, characterKey, System.StringComparison.Ordinal) ||
+                                   (!characterKey.StartsWith("Character_", System.StringComparison.Ordinal) &&
+                                    meshObjectName.StartsWith(characterKey, System.StringComparison.Ordinal));
+                meshObject.SetActive(shouldEnable);
+                if (shouldEnable)
+                {
+                    skinnedMesh.enabled = true;
+                }
             }
         }
 
@@ -189,7 +561,7 @@ namespace ShooterPrototype.EditorTools
                 EncapsulateLocalBounds(renderers[i].bounds, syntyRoot, ref minLocal, ref maxLocal);
             }
 
-            var targetHeight = 1.72f;
+            var targetHeight = TargetCharacterHeightMeters;
             var currentHeight = Mathf.Max(0.01f, maxLocal.y - minLocal.y);
             var scale = targetHeight / currentHeight;
             var feetOffsetY = -minLocal.y * scale;
@@ -225,31 +597,21 @@ namespace ShooterPrototype.EditorTools
             }
         }
 
-        private static void SaveTargetPrefab(GameObject instance)
+        private static void SavePrefab(GameObject instance, string targetPrefabPath)
         {
             EnsureFolder("Assets/Prefabs/Player");
-
-            var existing = AssetDatabase.LoadAssetAtPath<GameObject>(TargetPrefabPath);
-            if (existing != null)
-            {
-                PrefabUtility.SaveAsPrefabAsset(instance, TargetPrefabPath);
-            }
-            else
-            {
-                PrefabUtility.SaveAsPrefabAsset(instance, TargetPrefabPath);
-            }
-
+            PrefabUtility.SaveAsPrefabAsset(instance, targetPrefabPath);
             AssetDatabase.SaveAssets();
-            AssetDatabase.ImportAsset(TargetPrefabPath, ImportAssetOptions.ForceUpdate);
+            AssetDatabase.ImportAsset(targetPrefabPath, ImportAssetOptions.ForceUpdate);
 
-            var saved = AssetDatabase.LoadAssetAtPath<GameObject>(TargetPrefabPath);
+            var saved = AssetDatabase.LoadAssetAtPath<GameObject>(targetPrefabPath);
             if (saved != null)
             {
                 EditorGUIUtility.PingObject(saved);
                 Selection.activeObject = saved;
             }
 
-            Debug.Log($"[SyntyPlayerPrefabCreator] Saved prefab: {TargetPrefabPath}");
+            Debug.Log($"[SyntyPlayerPrefabCreator] Saved prefab: {targetPrefabPath}");
         }
 
         private static void EnsureFolder(string folderPath)
@@ -271,6 +633,70 @@ namespace ShooterPrototype.EditorTools
 
                 current = next;
             }
+        }
+
+        private static SkinnedMeshRenderer FindSkinnedMeshByObjectName(Transform visualRoot, string objectName)
+        {
+            if (visualRoot == null || string.IsNullOrWhiteSpace(objectName))
+            {
+                return null;
+            }
+
+            var skinnedMeshes = visualRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            for (var i = 0; i < skinnedMeshes.Length; i++)
+            {
+                var skinnedMesh = skinnedMeshes[i];
+                if (skinnedMesh != null &&
+                    string.Equals(skinnedMesh.gameObject.name, objectName, System.StringComparison.OrdinalIgnoreCase))
+                {
+                    return skinnedMesh;
+                }
+            }
+
+            return null;
+        }
+
+        private static SkinnedMeshRenderer FindBestBodySkinnedMesh(Transform visualRoot)
+        {
+            if (visualRoot == null)
+            {
+                return null;
+            }
+
+            var skinnedMeshes = visualRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            SkinnedMeshRenderer best = null;
+            var bestScore = int.MinValue;
+            for (var i = 0; i < skinnedMeshes.Length; i++)
+            {
+                var skinnedMesh = skinnedMeshes[i];
+                if (skinnedMesh == null ||
+                    skinnedMesh.sharedMesh == null ||
+                    skinnedMesh.gameObject.name.EndsWith("_FirstPersonArms", System.StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var objectName = skinnedMesh.gameObject.name;
+                if (objectName.StartsWith("SM_Char_Attach", System.StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var score = skinnedMesh.sharedMesh.vertexCount;
+                if (objectName.StartsWith("Ch", System.StringComparison.Ordinal) ||
+                    objectName.StartsWith("Character_", System.StringComparison.Ordinal))
+                {
+                    score += 100000;
+                }
+
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    best = skinnedMesh;
+                }
+            }
+
+            return best;
         }
 
         private static Transform FindChildRecursive(Transform root, string childName)

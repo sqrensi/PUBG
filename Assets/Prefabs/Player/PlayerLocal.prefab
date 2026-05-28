@@ -959,6 +959,7 @@ MonoBehaviour:
   bobPositionY: 0.01
   bobRotationZ: 3.2
   bobSmoothing: 0.08
+  walkBobFrequencyMultiplier: 1.22
   idleFreezeSpeedThreshold: 0.015
   enableIdleSway: 1
   idleSwaySpeed: 1
@@ -1001,7 +1002,7 @@ MonoBehaviour:
   sprintWeaponLocalEuler: {x: 3.18, y: -57.1, z: -20}
   sprintBlendSmoothTime: 0.14
   sprintBobAmplitudeMultiplier: 1.7
-  sprintBobFrequencyMultiplier: 1.65
+  sprintBobFrequencyMultiplier: 0.82
   sprintBobSmoothTime: 0.06
   crouchWeaponDrop: 0.18
   crouchBlendSmoothTime: 0.16

@@ -27,7 +27,7 @@ namespace ShooterPrototype.Network
 
             var offset = 4;
             var version = ReadU8(data, ref offset);
-            if (version != 1 && version != 2)
+            if (version != 1 && version != 2 && version != 3)
             {
                 return false;
             }
@@ -96,7 +96,7 @@ namespace ShooterPrototype.Network
                 var flags2 = ReadU16(data, ref offset);
                 var jumpState = ReadU8(data, ref offset);
 
-                if (offset + (version >= 2 ? 72 : 48) > data.Length)
+                if (offset + (version >= 3 ? 80 : version >= 2 ? 72 : 48) > data.Length)
                 {
                     return false;
                 }
@@ -119,6 +119,8 @@ namespace ShooterPrototype.Network
                 var shotDirX = 0f;
                 var shotDirY = 0f;
                 var shotDirZ = 0f;
+                var moveInputX = 0f;
+                var moveInputZ = 0f;
                 if (version >= 2)
                 {
                     if (offset + 24 > data.Length)
@@ -132,6 +134,17 @@ namespace ShooterPrototype.Network
                     shotDirX = ReadF32(data, ref offset);
                     shotDirY = ReadF32(data, ref offset);
                     shotDirZ = ReadF32(data, ref offset);
+                }
+
+                if (version >= 3)
+                {
+                    if (offset + 8 > data.Length)
+                    {
+                        return false;
+                    }
+
+                    moveInputX = ReadF32(data, ref offset);
+                    moveInputZ = ReadF32(data, ref offset);
                 }
 
                 if (offset >= data.Length)
@@ -173,6 +186,8 @@ namespace ShooterPrototype.Network
                     velX = velX,
                     velY = velY,
                     velZ = velZ,
+                    moveInputX = moveInputX,
+                    moveInputZ = moveInputZ,
                     lookPitch = lookPitch,
                     shotSeq = shotSeq,
                     reloadSeq = reloadSeq,
