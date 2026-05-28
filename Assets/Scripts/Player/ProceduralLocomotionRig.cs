@@ -54,6 +54,12 @@ namespace ShooterPrototype.Player
         [SerializeField] private bool useVelocityDrivenNetworkLocomotion = true;
         [SerializeField] private float remoteVelocitySpeedSmooth = 14f;
 
+        [Header("Hip look pitch (shoulders + arms)")]
+        [SerializeField] private bool enableHipLookPitchFollow = false;
+        [SerializeField] private float hipLookPitchShoulderInfluence = 0.08f;
+        [SerializeField] private float hipLookPitchMax = 75f;
+        [SerializeField] private float hipLookPitchSmoothTime = 0.07f;
+
         [Header("Leg curve")]
         [SerializeField] private float legBendForward = 0.05f;
         [SerializeField] private float legBendOutward = 0.03f;
@@ -71,6 +77,7 @@ namespace ShooterPrototype.Player
 
         private Vector3 baseRootLocalPos;
         private Vector3 baseShoulderLocalPos;
+        private Quaternion baseShoulderLocalRot = Quaternion.identity;
         private Vector3 baseHipLocalPos;
         private Vector3 baseLeftHandLocalPos;
         private Vector3 baseRightHandLocalPos;
@@ -95,6 +102,11 @@ namespace ShooterPrototype.Player
         private float networkAnimPhase01;
         private bool networkCrouching;
         private bool networkSprinting;
+        private bool useExplicitNetworkAnimation;
+        private float explicitNetworkSpeed01;
+        private float networkLookPitch;
+        private float smoothedLookPitchShoulder;
+        private float lookPitchShoulderVelocity;
         private Vector3 networkWorldVelocity;
         private bool hasNetworkWorldVelocity;
         private float crouchBlend;
@@ -219,7 +231,14 @@ namespace ShooterPrototype.Player
 
             networkSpeed01 = Mathf.Clamp(speed01, 0f, MaxNetworkAnimSpeed01);
             networkAnimPhase01 = Mathf.Repeat(animPhase01, 1f);
+            explicitNetworkSpeed01 = networkSpeed01;
+            useExplicitNetworkAnimation = true;
             SetNetworkDiscreteState(grounded, jumpState, isCrouching, isSprinting);
+        }
+
+        public void SetNetworkLookPitch(float lookPitch)
+        {
+            networkLookPitch = lookPitch;
         }
 
         public void SetNetworkDiscreteState(
@@ -291,7 +310,7 @@ namespace ShooterPrototype.Player
                 ? ComputeLocalAnimSpeed01()
                 : Mathf.Clamp01(GetHorizontalSpeed() / 5.5f);
 
-            if (useNetworkState && useVelocityDrivenNetworkLocomotion && hasNetworkWorldVelocity)
+            if (useNetworkState && useVelocityDrivenNetworkLocomotion && hasNetworkWorldVelocity && !useExplicitNetworkAnimation)
             {
                 var horizontalSpeed = new Vector3(networkWorldVelocity.x, 0f, networkWorldVelocity.z).magnitude;
                 var targetSpeed01 = Mathf.Clamp01(horizontalSpeed / Mathf.Max(0.01f, remoteHorizontalSpeedReference));
@@ -305,6 +324,13 @@ namespace ShooterPrototype.Player
                 networkSpeed01 = Mathf.Lerp(
                     networkSpeed01,
                     targetSpeed01,
+                    Mathf.Clamp01(dt * remoteVelocitySpeedSmooth));
+            }
+            else if (useNetworkState && useExplicitNetworkAnimation)
+            {
+                networkSpeed01 = Mathf.Lerp(
+                    networkSpeed01,
+                    explicitNetworkSpeed01,
                     Mathf.Clamp01(dt * remoteVelocitySpeedSmooth));
             }
 
@@ -381,6 +407,15 @@ namespace ShooterPrototype.Player
             if (useNetworkState && useVelocityDrivenNetworkLocomotion)
             {
                 walkPhase += dt * walkCycleSpeed * cycleMultiplier * Mathf.Lerp(phaseMin, 1.8f, motionSpeed01);
+                if (motionSpeed01 > remoteIdleDeadzone)
+                {
+                    var currentDeg = walkPhase * Mathf.Rad2Deg;
+                    var targetDeg = networkAnimPhase01 * 360f;
+                    var syncRate = networkSprinting ? remoteSprintPhaseSyncRate : remoteWalkPhaseSyncRate;
+                    walkPhase = (currentDeg + Mathf.DeltaAngle(currentDeg, targetDeg) * Mathf.Clamp01(dt * syncRate)) *
+                                Mathf.Deg2Rad;
+                    walkPhase += dt * walkCycleSpeed * cycleMultiplier * motionSpeed01 * 0.1f;
+                }
             }
             else if (useNetworkState && motionSpeed01 > remoteIdleDeadzone)
             {
@@ -421,6 +456,7 @@ namespace ShooterPrototype.Player
             var torsoFollowDrop = crouchTorsoFollowDrop * crouchBlend;
             rootTransform.localPosition = baseRootLocalPos + Vector3.down * (crouchRootDrop * crouchBlend);
             shoulderAnchor.localPosition = baseShoulderLocalPos + new Vector3(0f, bob - landImpulse - crouchShoulderDrop * crouchBlend - torsoFollowDrop, 0f);
+            ApplyHipLookPitchToShoulder(dt);
             hipAnchor.localPosition = baseHipLocalPos + new Vector3(0f, bob * 0.55f - landImpulse * 0.6f - crouchHipDrop * crouchBlend - torsoFollowDrop * 0.8f, 0f);
             ApplyCrouchLineDrop(crouchBlend);
 
@@ -490,10 +526,33 @@ namespace ShooterPrototype.Player
             EmitDebugArmJitterLog(motionSpeed01, smoothTime);
         }
 
+        private void ApplyHipLookPitchToShoulder(float dt)
+        {
+            if (!enableHipLookPitchFollow || shoulderAnchor == null)
+            {
+                return;
+            }
+
+            var pitch = useNetworkState
+                ? networkLookPitch
+                : (fpsController != null ? fpsController.CurrentLookPitch : 0f);
+            var clampedPitch = Mathf.Clamp(pitch, -hipLookPitchMax, hipLookPitchMax);
+            var targetShoulderPitch = clampedPitch * hipLookPitchShoulderInfluence;
+            smoothedLookPitchShoulder = Mathf.SmoothDamp(
+                smoothedLookPitchShoulder,
+                targetShoulderPitch,
+                ref lookPitchShoulderVelocity,
+                Mathf.Max(0.01f, hipLookPitchSmoothTime),
+                Mathf.Infinity,
+                dt);
+            shoulderAnchor.localRotation = baseShoulderLocalRot * Quaternion.Euler(smoothedLookPitchShoulder, 0f, 0f);
+        }
+
         private void CacheBasePose()
         {
             baseRootLocalPos = rootTransform != null ? rootTransform.localPosition : Vector3.zero;
             baseShoulderLocalPos = shoulderAnchor != null ? shoulderAnchor.localPosition : Vector3.zero;
+            baseShoulderLocalRot = shoulderAnchor != null ? shoulderAnchor.localRotation : Quaternion.identity;
             baseHipLocalPos = hipAnchor != null ? hipAnchor.localPosition : Vector3.zero;
             baseLeftHandLocalPos = leftHandTarget != null ? leftHandTarget.localPosition : Vector3.zero;
             baseRightHandLocalPos = rightHandTarget != null ? rightHandTarget.localPosition : Vector3.zero;

@@ -54,6 +54,12 @@ namespace ShooterPrototype.Network
             public float velZ;
             public int sampleTick;
             public long sampleTimeMs;
+            public float shotOriginX;
+            public float shotOriginY;
+            public float shotOriginZ;
+            public float shotDirX;
+            public float shotDirY;
+            public float shotDirZ;
             public RealtimeStateSample[] history;
         }
 
@@ -155,6 +161,12 @@ namespace ShooterPrototype.Network
             public float moveInputZ;
             public bool jumpPressed;
             public bool inputAuth;
+            public float shotOriginX;
+            public float shotOriginY;
+            public float shotOriginZ;
+            public float shotDirX;
+            public float shotDirY;
+            public float shotDirZ;
         }
 
         [Serializable]
@@ -264,7 +276,9 @@ namespace ShooterPrototype.Network
             float moveInputX = 0f,
             float moveInputZ = 0f,
             bool jumpPressed = false,
-            bool inputAuth = false)
+            bool inputAuth = false,
+            Vector3 shotOrigin = default,
+            Vector3 shotDirection = default)
         {
             if (!IsConnected)
             {
@@ -303,6 +317,12 @@ namespace ShooterPrototype.Network
                 moveInputZ = Mathf.Clamp(moveInputZ, -1f, 1f),
                 jumpPressed = jumpPressed,
                 inputAuth = inputAuth,
+                shotOriginX = shotOrigin.x,
+                shotOriginY = shotOrigin.y,
+                shotOriginZ = shotOrigin.z,
+                shotDirX = shotDirection.x,
+                shotDirY = shotDirection.y,
+                shotDirZ = shotDirection.z,
                 poseSeq = ++nextPoseSeq
             };
             hasPendingPose = true;

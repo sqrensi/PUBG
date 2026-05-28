@@ -72,6 +72,9 @@ namespace ShooterPrototype.Player
             public int NetworkJumpState;
             public bool NetworkCrouching;
             public bool NetworkSprinting;
+            public float NetworkAnimSpeed;
+            public float NetworkAnimPhase;
+            public float NetworkLookPitch;
             public Vector2 HorizontalSmoothVelocity;
             public float VerticalSmoothVelocity;
             public int LastAppliedShotSeq = -1;
@@ -286,12 +289,14 @@ namespace ShooterPrototype.Player
                 return;
             }
 
-            avatar.LocomotionRig.DriveNetworkLocomotionFromVelocity(
-                pose.Velocity,
+            avatar.LocomotionRig.SetNetworkAnimationState(
+                avatar.NetworkAnimSpeed,
                 avatar.NetworkGrounded,
                 avatar.NetworkJumpState,
+                avatar.NetworkAnimPhase,
                 avatar.NetworkCrouching,
                 avatar.NetworkSprinting);
+            avatar.LocomotionRig.SetNetworkLookPitch(avatar.NetworkLookPitch);
         }
 
         public void FlushLocalPose()
@@ -328,6 +333,8 @@ namespace ShooterPrototype.Player
             var deathSeq = localHealth != null ? localHealth.DeathSequence : 0;
             var deathFallDirection = localHealth != null ? localHealth.DeathFallDirection : Vector3.forward;
             var lookPitch = localFpsController != null ? localFpsController.CurrentLookPitch : 0f;
+            var shotOrigin = localWeaponController != null ? localWeaponController.LastShotOrigin : Vector3.zero;
+            var shotDirection = localWeaponController != null ? localWeaponController.LastShotDirection : Vector3.zero;
             var animSpeed = localLocomotionRig != null
                 ? localLocomotionRig.GetNetworkAnimSpeed01()
                 : (localFpsController != null ? Mathf.Clamp01(localFpsController.MoveInputMagnitude) : 0f);
@@ -367,7 +374,9 @@ namespace ShooterPrototype.Player
                 moveInputX,
                 moveInputZ,
                 jumpPressed,
-                inputAuth);
+                inputAuth,
+                shotOrigin,
+                shotDirection);
         }
 
         private IEnumerator SyncRoutine()
@@ -663,6 +672,9 @@ namespace ShooterPrototype.Player
                     avatar.NetworkJumpState = p.jumpState;
                     avatar.NetworkCrouching = p.isCrouching;
                     avatar.NetworkSprinting = p.isSprinting;
+                    avatar.NetworkAnimSpeed = p.animSpeed;
+                    avatar.NetworkAnimPhase = p.animPhase;
+                    avatar.NetworkLookPitch = p.lookPitch;
                     IngestPlayerStateSamples(avatar, p);
 
                     var weaponMount = avatar.Root.GetComponent<PlayerWeaponMount>();
@@ -682,11 +694,14 @@ namespace ShooterPrototype.Player
 
                     if (avatar.LocomotionRig != null)
                     {
-                        avatar.LocomotionRig.SetNetworkDiscreteState(
+                        avatar.LocomotionRig.SetNetworkAnimationState(
+                            p.animSpeed,
                             avatar.NetworkGrounded,
                             avatar.NetworkJumpState,
+                            p.animPhase,
                             avatar.NetworkCrouching,
                             avatar.NetworkSprinting);
+                        avatar.LocomotionRig.SetNetworkLookPitch(p.lookPitch);
                     }
 
                     avatar.Health?.SetNetworkDeadState(
@@ -828,9 +843,11 @@ namespace ShooterPrototype.Player
             }
 
             var shotsToReplay = Mathf.Clamp(playerState.shotSeq - avatar.LastAppliedShotSeq, 1, 4);
+            var shotOrigin = new Vector3(playerState.shotOriginX, playerState.shotOriginY, playerState.shotOriginZ);
+            var shotDirection = new Vector3(playerState.shotDirX, playerState.shotDirY, playerState.shotDirZ);
             for (var i = 0; i < shotsToReplay; i++)
             {
-                weaponController.PlayRemoteShot(playerState.lookPitch);
+                weaponController.PlayRemoteShot(shotOrigin, shotDirection, playerState.lookPitch);
             }
 
             avatar.LastAppliedShotSeq = playerState.shotSeq;

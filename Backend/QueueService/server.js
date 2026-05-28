@@ -653,6 +653,12 @@ function handleWsPose(socket, message) {
   const yaw = normalizeNumber(message.yaw, 0);
   const lookPitch = normalizeNumber(message.lookPitch, 0);
   const shotSeq = Math.max(0, normalizeInt64(message.shotSeq, 0));
+  const shotOriginX = normalizeNumber(message.shotOriginX, 0);
+  const shotOriginY = normalizeNumber(message.shotOriginY, 0);
+  const shotOriginZ = normalizeNumber(message.shotOriginZ, 0);
+  const shotDirX = normalizeNumber(message.shotDirX, 0);
+  const shotDirY = normalizeNumber(message.shotDirY, 0);
+  const shotDirZ = normalizeNumber(message.shotDirZ, 0);
   const reloadSeq = Math.max(0, normalizeInt64(message.reloadSeq, 0));
   const hitPlayerSeq = Math.max(0, normalizeInt64(message.hitPlayerSeq, 0));
   const footstepSeq = Math.max(0, normalizeInt64(message.footstepSeq, 0));
@@ -736,6 +742,14 @@ function handleWsPose(socket, message) {
 
   presence.lookPitch = lookPitch;
   presence.shotSeq = shotSeq;
+  if (shotSeq > (prevPresence.shotSeq || 0)) {
+    presence.shotOriginX = shotOriginX;
+    presence.shotOriginY = shotOriginY;
+    presence.shotOriginZ = shotOriginZ;
+    presence.shotDirX = shotDirX;
+    presence.shotDirY = shotDirY;
+    presence.shotDirZ = shotDirZ;
+  }
   presence.reloadSeq = reloadSeq;
   presence.hitPlayerSeq = hitPlayerSeq;
   presence.footstepSeq = footstepSeq;
@@ -786,6 +800,12 @@ function createDefaultPresence(sampleTick, sampleTimeMs) {
     yaw: 0,
     lookPitch: 0,
     shotSeq: 0,
+    shotOriginX: 0,
+    shotOriginY: 0,
+    shotOriginZ: 0,
+    shotDirX: 0,
+    shotDirY: 0,
+    shotDirZ: 0,
     reloadSeq: 0,
     hitPlayerSeq: 0,
     footstepSeq: 0,
@@ -1211,7 +1231,7 @@ function encodeSnapshotBinary(payload) {
     const chunks = [];
     const header = Buffer.alloc(11);
     header.write("RTS1", 0, 4, "ascii");
-    header.writeUInt8(1, 4);
+    header.writeUInt8(2, 4);
     header.writeUInt32LE(payload.serverTick >>> 0, 5);
     header.writeUInt16LE(payload.serverTickRate >>> 0, 9);
     chunks.push(header);
@@ -1260,7 +1280,7 @@ function encodeSnapshotBinary(payload) {
       body.writeUInt8(Math.max(0, Math.min(2, player.jumpState || 0)), 34);
       chunks.push(body);
 
-      const meta = Buffer.alloc(48);
+      const meta = Buffer.alloc(72);
       meta.writeFloatLE(player.lookPitch || 0, 0);
       meta.writeUInt32LE((player.shotSeq || 0) >>> 0, 4);
       meta.writeUInt32LE((player.reloadSeq || 0) >>> 0, 8);
@@ -1273,6 +1293,12 @@ function encodeSnapshotBinary(payload) {
       meta.writeFloatLE(player.deathFallDirX || 0, 36);
       meta.writeFloatLE(player.deathFallDirY || 0, 40);
       meta.writeFloatLE(player.deathFallDirZ || 0, 44);
+      meta.writeFloatLE(player.shotOriginX || 0, 48);
+      meta.writeFloatLE(player.shotOriginY || 0, 52);
+      meta.writeFloatLE(player.shotOriginZ || 0, 56);
+      meta.writeFloatLE(player.shotDirX || 0, 60);
+      meta.writeFloatLE(player.shotDirY || 0, 64);
+      meta.writeFloatLE(player.shotDirZ || 0, 68);
       chunks.push(meta);
 
       const history = Array.isArray(player.history) ? player.history : [];
@@ -1402,6 +1428,12 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       yaw: ticket.presence.yaw,
       lookPitch: ticket.presence.lookPitch || 0,
       shotSeq: Number.isFinite(ticket.presence.shotSeq) ? ticket.presence.shotSeq : 0,
+      shotOriginX: Number.isFinite(ticket.presence.shotOriginX) ? ticket.presence.shotOriginX : 0,
+      shotOriginY: Number.isFinite(ticket.presence.shotOriginY) ? ticket.presence.shotOriginY : 0,
+      shotOriginZ: Number.isFinite(ticket.presence.shotOriginZ) ? ticket.presence.shotOriginZ : 0,
+      shotDirX: Number.isFinite(ticket.presence.shotDirX) ? ticket.presence.shotDirX : 0,
+      shotDirY: Number.isFinite(ticket.presence.shotDirY) ? ticket.presence.shotDirY : 0,
+      shotDirZ: Number.isFinite(ticket.presence.shotDirZ) ? ticket.presence.shotDirZ : 0,
       reloadSeq: Number.isFinite(ticket.presence.reloadSeq) ? ticket.presence.reloadSeq : 0,
       hitPlayerSeq: Number.isFinite(ticket.presence.hitPlayerSeq) ? ticket.presence.hitPlayerSeq : 0,
       footstepSeq: Number.isFinite(ticket.presence.footstepSeq) ? ticket.presence.footstepSeq : 0,

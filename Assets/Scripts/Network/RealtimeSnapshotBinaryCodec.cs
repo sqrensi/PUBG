@@ -27,7 +27,7 @@ namespace ShooterPrototype.Network
 
             var offset = 4;
             var version = ReadU8(data, ref offset);
-            if (version != 1)
+            if (version != 1 && version != 2)
             {
                 return false;
             }
@@ -96,7 +96,7 @@ namespace ShooterPrototype.Network
                 var flags2 = ReadU16(data, ref offset);
                 var jumpState = ReadU8(data, ref offset);
 
-                if (offset + 48 > data.Length)
+                if (offset + (version >= 2 ? 72 : 48) > data.Length)
                 {
                     return false;
                 }
@@ -113,6 +113,26 @@ namespace ShooterPrototype.Network
                 var deathFallDirX = ReadF32(data, ref offset);
                 var deathFallDirY = ReadF32(data, ref offset);
                 var deathFallDirZ = ReadF32(data, ref offset);
+                var shotOriginX = 0f;
+                var shotOriginY = 0f;
+                var shotOriginZ = 0f;
+                var shotDirX = 0f;
+                var shotDirY = 0f;
+                var shotDirZ = 0f;
+                if (version >= 2)
+                {
+                    if (offset + 24 > data.Length)
+                    {
+                        return false;
+                    }
+
+                    shotOriginX = ReadF32(data, ref offset);
+                    shotOriginY = ReadF32(data, ref offset);
+                    shotOriginZ = ReadF32(data, ref offset);
+                    shotDirX = ReadF32(data, ref offset);
+                    shotDirY = ReadF32(data, ref offset);
+                    shotDirZ = ReadF32(data, ref offset);
+                }
 
                 if (offset >= data.Length)
                 {
@@ -165,6 +185,12 @@ namespace ShooterPrototype.Network
                     deathFallDirX = deathFallDirX,
                     deathFallDirY = deathFallDirY,
                     deathFallDirZ = deathFallDirZ,
+                    shotOriginX = shotOriginX,
+                    shotOriginY = shotOriginY,
+                    shotOriginZ = shotOriginZ,
+                    shotDirX = shotDirX,
+                    shotDirY = shotDirY,
+                    shotDirZ = shotDirZ,
                     isDead = (flags2 & 1) != 0,
                     isGrounded = (flags2 & 2) != 0,
                     isCrouching = (flags2 & 4) != 0,

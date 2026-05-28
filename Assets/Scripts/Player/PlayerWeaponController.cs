@@ -78,6 +78,8 @@ namespace ShooterPrototype.Player
         private int shotSequence;
         private int reloadSequence;
         private int hitPlayerSequence;
+        private Vector3 lastShotOrigin;
+        private Vector3 lastShotDirection = Vector3.forward;
         private int currentAmmo;
         private bool isReloading;
         private Coroutine reloadCoroutine;
@@ -96,6 +98,8 @@ namespace ShooterPrototype.Player
         }
 
         public int LastShotSequence => shotSequence;
+        public Vector3 LastShotOrigin => lastShotOrigin;
+        public Vector3 LastShotDirection => lastShotDirection;
         public int LastReloadSequence => reloadSequence;
         public int LastHitPlayerSequence => hitPlayerSequence;
         public int CurrentAmmo => currentAmmo;
@@ -197,6 +201,8 @@ namespace ShooterPrototype.Player
 
             var origin = muzzle != null ? muzzle.position : transform.position + transform.forward * 0.2f;
             var direction = ResolveShootDirection(origin);
+            lastShotOrigin = origin;
+            lastShotDirection = direction;
             shotSequence++;
             currentAmmo = Mathf.Max(0, currentAmmo - 1);
             SimulateShotEffects(origin, direction, applyRecoil: true);
@@ -207,13 +213,18 @@ namespace ShooterPrototype.Player
             }
         }
 
-        public void PlayRemoteShot(float lookPitch)
+        public void PlayRemoteShot(Vector3 networkOrigin, Vector3 networkDirection, float lookPitch)
         {
             TryResolveRuntimeMuzzle();
-            var origin = muzzle != null
-                ? muzzle.position
-                : transform.position + Vector3.up * 1.2f + transform.forward * 0.2f;
-            var direction = ResolveRemoteShootDirection(lookPitch);
+            var hasNetworkShot = networkDirection.sqrMagnitude > 0.0001f;
+            var origin = hasNetworkShot
+                ? networkOrigin
+                : muzzle != null
+                    ? muzzle.position
+                    : transform.position + Vector3.up * 1.2f + transform.forward * 0.2f;
+            var direction = hasNetworkShot
+                ? networkDirection.normalized
+                : ResolveRemoteShootDirection(lookPitch);
             SimulateShotEffects(origin, direction, applyRecoil: false);
             audioController?.PlayShot(false);
         }

@@ -111,6 +111,7 @@ namespace ShooterPrototype.Player
         public float NetworkMoveInputZ => networkMoveInputZ;
         public bool NetworkJumpPressed => networkJumpPressed;
         public float CurrentLookPitch => cameraPitch + recoilPitchOffset;
+        public float HipMaxLookAngle => Mathf.Clamp(hipMaxLookAngle, 1f, 89f);
         public int LastFootstepSequence => footstepSequence;
 
         public void SetServerReconciliationSuspended(bool suspended)
@@ -266,15 +267,17 @@ namespace ShooterPrototype.Player
 
             cameraPitch -= mouseY;
             ApplyManualRecoilRecovery(mouseY);
-            var fallback = Mathf.Clamp(maxLookAngle, 1f, 89f);
-            var hipLimit = Mathf.Clamp(hipMaxLookAngle, 1f, 89f);
-            var adsLimit = Mathf.Clamp(adsMaxLookAngle, 1f, 89f);
-            var lookLimit = ReadAimPressed() ? adsLimit : hipLimit;
-            if (lookLimit <= 0f)
+            if (ReadAimPressed())
             {
-                lookLimit = fallback;
+                var adsCameraLimit = Mathf.Clamp(adsMaxLookAngle, 1f, 89f);
+                cameraPitch = Mathf.Clamp(cameraPitch, -adsCameraLimit, adsCameraLimit);
             }
-            cameraPitch = Mathf.Clamp(cameraPitch, -lookLimit, lookLimit);
+            else
+            {
+                var hipUpLimit = Mathf.Clamp(maxLookAngle, 1f, 89f);
+                var hipDownLimit = Mathf.Clamp(hipMaxLookAngle, 1f, 89f);
+                cameraPitch = Mathf.Clamp(cameraPitch, -hipUpLimit, hipDownLimit);
+            }
             if (enableRecoilRecovery && autoRecoilRecoveryActive)
             {
                 var recoverySpeed = recoilRecoverySpeed;

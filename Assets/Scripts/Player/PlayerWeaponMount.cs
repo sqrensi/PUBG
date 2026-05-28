@@ -47,10 +47,15 @@ namespace ShooterPrototype.Player
         [SerializeField] private float cameraPitchArcBackward = 0.03f;
         [SerializeField] private float cameraPitchYawInfluence = 2.2f;
 
-        [Header("Aim Down Sights (ADS)")]
-        [SerializeField] private bool enableAimDownSights = true;
+        [Header("Hip fire (camera lock)")]
+        [SerializeField] private bool hipLockToCameraPivot = true;
+        [SerializeField] private Vector3 hipCameraLocalPosition = new Vector3(0.21f, -0.16f, 0.38f);
+        [SerializeField] private Vector3 hipCameraLocalEuler = new Vector3(-0.75f, -3f, 4.5f);
         [SerializeField] private Vector3 hipAnchorLocalPosition = new Vector3(0.21f, 1.2f, 0.365f);
         [SerializeField] private Vector3 hipAnchorLocalEuler = new Vector3(-0.752f, -3.043f, 4.539f);
+
+        [Header("Aim Down Sights (ADS)")]
+        [SerializeField] private bool enableAimDownSights = true;
         [SerializeField] private Vector3 adsAnchorLocalPosition = new Vector3(0f, 1.26f, 0f);
         [SerializeField] private Vector3 adsAnchorLocalEuler = new Vector3(0f, -1f, 0f);
         [SerializeField] private float adsSmoothTime = 0.08f;
@@ -314,18 +319,55 @@ namespace ShooterPrototype.Player
             {
                 var smooth = Mathf.Max(0.01f, adsSmoothTime);
                 var parentTransform = weaponParent.parent;
-                var hipLocalPosition = hipAnchorLocalPosition;
-                var hipLocalRotation = Quaternion.Euler(hipAnchorLocalEuler);
 
                 var wallTargetBlend = useNetworkState
                     ? Mathf.Clamp01(networkWallAvoidBlend)
                     : ComputeWallAvoidanceTargetBlend();
 
+                var sprintPitchFollowScale = 1f - Mathf.Clamp01(sprintBlend);
+                var cameraWorldRotation = cameraPivot != null
+                    ? GetAimReferenceRotation(wallTargetBlend, sprintPitchFollowScale)
+                    : transform.rotation;
+
+                Vector3 hipBodyWorldPosition;
+                Quaternion hipBodyWorldRotation;
+                if (parentTransform != null)
+                {
+                    hipBodyWorldPosition = parentTransform.TransformPoint(hipAnchorLocalPosition);
+                    hipBodyWorldRotation = parentTransform.rotation * Quaternion.Euler(hipAnchorLocalEuler);
+                }
+                else
+                {
+                    hipBodyWorldPosition = hipAnchorLocalPosition;
+                    hipBodyWorldRotation = Quaternion.Euler(hipAnchorLocalEuler);
+                }
+
+                Vector3 hipWorldPosition;
+                Quaternion hipWorldRotation;
+                if (hipLockToCameraPivot && cameraPivot != null && !useNetworkState)
+                {
+                    var lockedWorldPosition = cameraPivot.position + (cameraWorldRotation * hipCameraLocalPosition);
+                    var lockedWorldRotation = cameraWorldRotation * Quaternion.Euler(hipCameraLocalEuler);
+                    hipWorldPosition = Vector3.Lerp(lockedWorldPosition, hipBodyWorldPosition, sprintBlend);
+                    hipWorldRotation = Quaternion.Slerp(lockedWorldRotation, hipBodyWorldRotation, sprintBlend);
+                }
+                else
+                {
+                    hipWorldPosition = hipBodyWorldPosition;
+                    hipWorldRotation = hipBodyWorldRotation;
+                }
+
+                var hipLocalPosition = parentTransform != null
+                    ? parentTransform.InverseTransformPoint(hipWorldPosition)
+                    : hipWorldPosition;
+                var hipLocalRotation = parentTransform != null
+                    ? Quaternion.Inverse(parentTransform.rotation) * hipWorldRotation
+                    : hipWorldRotation;
+
                 Vector3 adsWorldPosition;
                 Quaternion adsWorldRotation;
                 if ((adsUseSightLock || adsLockToCameraPivot) && cameraPivot != null)
                 {
-                    var cameraWorldRotation = GetAimReferenceRotation(wallTargetBlend);
                     adsWorldPosition = cameraPivot.position + (cameraWorldRotation * adsCameraLocalPosition);
                     adsWorldRotation = cameraWorldRotation * Quaternion.Euler(adsCameraLocalEuler);
                 }
@@ -381,18 +423,26 @@ namespace ShooterPrototype.Player
                 weaponParent.localRotation = Quaternion.Euler(smoothedAnchorX, smoothedAnchorY, smoothedAnchorZ);
             }
 
+            var isHipCameraFollow = hipLockToCameraPivot && cameraPivot != null && !useNetworkState
+                && adsPitchFollowBlend < 0.001f && sprintBlend < 0.001f;
             var isAdsCameraFollow = adsPitchFollowBlend > 0.001f && cameraPivot != null && (adsUseSightLock || adsLockToCameraPivot);
+            var isCameraLocked = isHipCameraFollow || isAdsCameraFollow;
             var hipPitchInfluence = 1f - adsPitchFollowBlend;
+            if (hipLockToCameraPivot && !useNetworkState && adsPitchFollowBlend < 0.001f && sprintBlend < 0.001f)
+            {
+                // Hip camera lock handles pitch on the anchor; skip extra hip arc/tilt on the model.
+                hipPitchInfluence = 0f;
+            }
             if (sprintBlend > 0.0001f)
             {
                 // During sprint, suppress camera pitch-driven weapon tilt completely.
                 hipPitchInfluence = 0f;
             }
 
-            var bobPosAmount = isAdsCameraFollow
+            var bobPosAmount = isCameraLocked
                 ? 0f
                 : amount * Mathf.Lerp(1f, Mathf.Clamp01(adsBobPositionMultiplier), adsBlend);
-            var bobRotAmount = isAdsCameraFollow
+            var bobRotAmount = isCameraLocked
                 ? 0f
                 : amount * Mathf.Lerp(1f, Mathf.Clamp01(adsBobRotationMultiplier), adsBlend);
             if (sprintBlend > 0.0001f)
@@ -403,7 +453,7 @@ namespace ShooterPrototype.Player
             }
 
             var idleSwayAmount = 0f;
-            if (enableIdleSway && !isAdsCameraFollow && sprintBlend < 0.95f)
+            if (enableIdleSway && !isCameraLocked && sprintBlend < 0.95f)
             {
                 var threshold = Mathf.Max(0.001f, idleFreezeSpeedThreshold * 2f);
                 idleSwayAmount = Mathf.Clamp01((threshold - amount) / threshold) *
@@ -472,23 +522,39 @@ namespace ShooterPrototype.Player
                     ? networkLookPitch
                     : NormalizeAngleSigned(cameraPivot.localEulerAngles.x);
                 var clampedPitch = Mathf.Clamp(pitch, cameraPitchMin, cameraPitchMax);
-                targetPitchOffset = clampedPitch * cameraPitchInfluence * hipPitchInfluence;
+                var hipWeight = 1f - Mathf.Clamp01(adsBlend);
+                var adsWeight = 1f - hipWeight;
+                var pitchArcScale = Mathf.Lerp(1f, Mathf.Clamp01(adsPitchArcMultiplier), adsBlend);
+                var pitchTiltScale = Mathf.Lerp(1f, Mathf.Clamp01(adsPitchTiltMultiplier), adsBlend);
+                var pitchBlend = hipPitchInfluence;
 
                 var maxAbsPitch = Mathf.Max(1f, Mathf.Max(Mathf.Abs(cameraPitchMin), Mathf.Abs(cameraPitchMax)));
                 var pitchNormalized = Mathf.Clamp(clampedPitch / maxAbsPitch, -1f, 1f);
                 var arcSin = Mathf.Sin(pitchNormalized * Mathf.PI * 0.5f);
                 var arcCos = 1f - Mathf.Cos(Mathf.Abs(pitchNormalized) * Mathf.PI * 0.5f);
-                var pitchArcScale = Mathf.Lerp(1f, Mathf.Clamp01(adsPitchArcMultiplier), adsBlend);
-                var pitchTiltScale = Mathf.Lerp(1f, Mathf.Clamp01(adsPitchTiltMultiplier), adsBlend);
-                var pitchBlend = hipPitchInfluence;
 
-                targetPos += new Vector3(
-                    0f,
-                    arcSin * cameraPitchArcVertical * pitchArcScale * pitchBlend,
-                    -arcCos * cameraPitchArcBackward * pitchArcScale * pitchBlend);
+                // Hip fire without camera lock: move weapon along a vertical arc.
+                if (hipWeight > 0.0001f && !(hipLockToCameraPivot && !useNetworkState))
+                {
+                    const float hipArcMaxAngle = 38f;
+                    const float hipArcRadius = 0.16f;
+                    var hipAngleRad = -pitchNormalized * hipArcMaxAngle * Mathf.Deg2Rad;
+                    targetPos += new Vector3(
+                        0f,
+                        Mathf.Sin(hipAngleRad) * hipArcRadius * hipWeight * pitchBlend,
+                        (1f - Mathf.Cos(hipAngleRad)) * hipArcRadius * hipWeight * pitchBlend);
+                }
 
-                targetYawOffset = arcSin * cameraPitchYawInfluence * pitchTiltScale * pitchBlend;
-                targetPitchOffset *= pitchTiltScale;
+                // ADS: keep subtle tilt + positional arc.
+                if (adsWeight > 0.0001f)
+                {
+                    targetPitchOffset = clampedPitch * cameraPitchInfluence * pitchTiltScale * adsWeight * pitchBlend;
+                    targetYawOffset = arcSin * cameraPitchYawInfluence * pitchTiltScale * adsWeight * pitchBlend;
+                    targetPos += new Vector3(
+                        0f,
+                        arcSin * cameraPitchArcVertical * pitchArcScale * adsWeight * pitchBlend,
+                        -arcCos * cameraPitchArcBackward * pitchArcScale * adsWeight * pitchBlend);
+                }
             }
             var pitchSmooth = Mathf.Max(0.01f, cameraPitchSmoothing);
             smoothedPitchOffset = Mathf.SmoothDampAngle(
@@ -724,8 +790,9 @@ namespace ShooterPrototype.Player
             reloadRoutine = null;
         }
 
-        private Quaternion GetAimReferenceRotation(float wallTargetBlend)
+        private Quaternion GetAimReferenceRotation(float wallTargetBlend, float pitchFollowScale = 1f)
         {
+            pitchFollowScale = Mathf.Clamp01(pitchFollowScale);
             float pitch;
             if (!useNetworkState)
             {
@@ -742,6 +809,13 @@ namespace ShooterPrototype.Player
             }
 
             var clampedPitch = Mathf.Clamp(pitch, cameraPitchMin, cameraPitchMax);
+            if (adsBlend < 0.999f)
+            {
+                ResolveHipWeaponPitchLimits(out var weaponDownLimit, out var weaponUpLimit);
+                weaponDownLimit = Mathf.Lerp(weaponDownLimit, cameraPitchMin, adsBlend);
+                weaponUpLimit = Mathf.Lerp(weaponUpLimit, cameraPitchMax, adsBlend);
+                clampedPitch = Mathf.Clamp(clampedPitch, weaponDownLimit, weaponUpLimit);
+            }
             var effectiveWallBlend = Mathf.Max(Mathf.Clamp01(wallTargetBlend), Mathf.Clamp01(wallAvoidBlend));
             var wallFollowBlock = Mathf.InverseLerp(
                 Mathf.Clamp01(adsWallPitchFollowStartBlend),
@@ -756,7 +830,22 @@ namespace ShooterPrototype.Player
                 clampedPitch *= followScale;
             }
 
+            clampedPitch *= pitchFollowScale;
+
             return transform.rotation * Quaternion.Euler(clampedPitch, 0f, 0f);
+        }
+
+        private void ResolveHipWeaponPitchLimits(out float downLimit, out float upLimit)
+        {
+            if (fpsController == null)
+            {
+                fpsController = GetComponent<FpsCharacterController>();
+            }
+
+            var maxPitch = fpsController != null ? fpsController.HipMaxLookAngle : 50f;
+            maxPitch = Mathf.Clamp(maxPitch, 1f, 89f);
+            downLimit = -maxPitch;
+            upLimit = maxPitch;
         }
 
         private void ApplyWallAvoidance(

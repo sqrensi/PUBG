@@ -973,9 +973,12 @@ MonoBehaviour:
   cameraPitchArcVertical: 0.02
   cameraPitchArcBackward: 0.03
   cameraPitchYawInfluence: 2.2
-  enableAimDownSights: 1
+  hipLockToCameraPivot: 1
+  hipCameraLocalPosition: {x: 0.21, y: -0.16, z: 0.38}
+  hipCameraLocalEuler: {x: -0.752, y: -3.043, z: 4.539}
   hipAnchorLocalPosition: {x: 0.21, y: 1.2, z: 0.365}
   hipAnchorLocalEuler: {x: -0.752, y: -3.043, z: 4.539}
+  enableAimDownSights: 1
   adsAnchorLocalPosition: {x: 0, y: 1.26, z: 0}
   adsAnchorLocalEuler: {x: 0, y: -1, z: 0}
   adsSmoothTime: 0.08

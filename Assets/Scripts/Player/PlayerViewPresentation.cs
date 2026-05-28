@@ -95,6 +95,20 @@ namespace ShooterPrototype.Player
 
         private bool IsFirstPersonVisibleRenderer(Transform rendererTransform, string objectName)
         {
+            var syntyBinder = GetComponent<SyntyCharacterVisualBinder>();
+            if (syntyBinder != null)
+            {
+                if (syntyBinder.ShouldHideRendererInFirstPerson(objectName, rendererTransform))
+                {
+                    return false;
+                }
+
+                if (syntyBinder.ShouldShowRendererInFirstPerson(objectName, rendererTransform))
+                {
+                    return true;
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(objectName) &&
                 objectName.IndexOf(armNameContains, System.StringComparison.OrdinalIgnoreCase) >= 0)
             {
