@@ -138,6 +138,35 @@ namespace ShooterPrototype.Player
         public float NetworkMoveInputX => networkMoveInputX;
         public float NetworkMoveInputZ => networkMoveInputZ;
 
+        public bool TryGetNetworkLocalMoveDirection(out float moveX, out float moveZ)
+        {
+            moveX = 0f;
+            moveZ = 0f;
+            if (!useNetworkState || !hasNetworkWorldVelocity)
+            {
+                return false;
+            }
+
+            var flatVelocity = new Vector3(networkWorldVelocity.x, 0f, networkWorldVelocity.z);
+            if (flatVelocity.sqrMagnitude < 0.04f)
+            {
+                return false;
+            }
+
+            var localDirection = rootTransform != null
+                ? rootTransform.InverseTransformDirection(flatVelocity)
+                : flatVelocity;
+            var magnitude = new Vector2(localDirection.x, localDirection.z).magnitude;
+            if (magnitude <= 0.01f)
+            {
+                return false;
+            }
+
+            moveX = localDirection.x / magnitude;
+            moveZ = localDirection.z / magnitude;
+            return true;
+        }
+
         public void SetProceduralVisualsEnabled(bool enabled)
         {
             disableProceduralVisuals = !enabled;
@@ -325,6 +354,14 @@ namespace ShooterPrototype.Player
             }
 
             var dt = Mathf.Max(0.0001f, Time.deltaTime);
+            if (disableProceduralVisuals && useNetworkState)
+            {
+                currentSpeed01 = networkSpeed01;
+                currentGrounded = networkGrounded;
+                currentJumpState = networkJumpState;
+                return;
+            }
+
             var grounded = useNetworkState ? networkGrounded : IsGrounded();
             var localInputSpeed01 = fpsController != null
                 ? ComputeLocalAnimSpeed01()

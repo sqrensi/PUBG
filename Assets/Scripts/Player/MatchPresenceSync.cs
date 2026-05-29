@@ -9,6 +9,12 @@ namespace ShooterPrototype.Player
     public sealed class MatchPresenceSync : MonoBehaviour
     {
         [SerializeField] private int syncTickRate = 128;
+        [Header("Remote locomotion smoothing")]
+        [SerializeField] private float remoteAnimSpeedSmoothTime = 0.12f;
+        [SerializeField] private float remoteAnimStopSmoothTime = 0.05f;
+        [SerializeField] private float remoteMoveInputSmoothTime = 0.1f;
+        [SerializeField] private float remoteMoveStopSmoothTime = 0.05f;
+
         [Header("Entity interpolation (CS-style)")]
         [SerializeField] private float interpolationBackTimeSeconds = 0.024f;
         [SerializeField] private float interpolationBackTimeMin = 0.016f;
@@ -27,9 +33,9 @@ namespace ShooterPrototype.Player
         [SerializeField] private float remotePositionLerpSpeed = 34f;
         [SerializeField] private float remoteVerticalLerpSpeed = 18f;
         [SerializeField] private float remoteRotationLerpSpeed = 34f;
-        [SerializeField] private float remoteHorizontalSmoothTime = 0.012f;
-        [SerializeField] private float remoteVerticalSmoothTime = 0.04f;
-        [SerializeField] private float remoteDirectFollowDistance = 0.08f;
+        [SerializeField] private float remoteHorizontalSmoothTime = 0.055f;
+        [SerializeField] private float remoteVerticalSmoothTime = 0.05f;
+        [SerializeField] private float remoteDirectFollowDistance = 0f;
         [SerializeField] private float remoteMissingGraceSeconds = 1.25f;
         [SerializeField] private float teleportSnapDistance = 4f;
         [SerializeField] private float verticalSnapDistance = 1.2f;
@@ -54,6 +60,7 @@ namespace ShooterPrototype.Player
         private float lastSnapshotDebugAt;
         private PlayerWeaponMount localWeaponMount;
         private PlayerWeaponController localWeaponController;
+        private PlayerAudioController localAudioController;
         private FpsCharacterController localFpsController;
         private ProceduralLocomotionRig localLocomotionRig;
         private PlayerHealth localHealth;
@@ -77,6 +84,12 @@ namespace ShooterPrototype.Player
             public float NetworkLookPitch;
             public float NetworkMoveInputX;
             public float NetworkMoveInputZ;
+            public float SmoothedNetworkAnimSpeed;
+            public float AnimSpeedSmoothVelocity;
+            public float SmoothedMoveInputX;
+            public float SmoothedMoveInputZ;
+            public float MoveInputXSmoothVelocity;
+            public float MoveInputZSmoothVelocity;
             public Vector2 HorizontalSmoothVelocity;
             public float VerticalSmoothVelocity;
             public int LastAppliedShotSeq = -1;
@@ -123,6 +136,7 @@ namespace ShooterPrototype.Player
             smoothedClockLastRealtimeSeconds = 0.0;
             localWeaponMount = GetComponent<PlayerWeaponMount>();
             localWeaponController = GetComponent<PlayerWeaponController>();
+            localAudioController = GetComponent<PlayerAudioController>();
             localFpsController = GetComponent<FpsCharacterController>();
             localLocomotionRig = GetComponent<ProceduralLocomotionRig>();
             localHealth = GetComponent<PlayerHealth>();
@@ -241,40 +255,26 @@ namespace ShooterPrototype.Player
 
             var horizontalCurrent = new Vector2(currentPosition.x, currentPosition.z);
             var horizontalTarget = new Vector2(targetPosition.x, targetPosition.z);
-            var horizontalError = Vector2.Distance(horizontalCurrent, horizontalTarget);
-            float horizontalNextX;
-            float horizontalNextZ;
-            if (horizontalError <= remoteDirectFollowDistance)
-            {
-                horizontalNextX = horizontalTarget.x;
-                horizontalNextZ = horizontalTarget.y;
-                avatar.HorizontalSmoothVelocity = Vector2.zero;
-            }
-            else
-            {
-                var horizontalNext = Vector2.SmoothDamp(
-                    horizontalCurrent,
-                    horizontalTarget,
-                    ref avatar.HorizontalSmoothVelocity,
-                    Mathf.Max(0.001f, remoteHorizontalSmoothTime),
-                    remotePositionLerpSpeed * 2f,
-                    Time.deltaTime);
-                horizontalNextX = horizontalNext.x;
-                horizontalNextZ = horizontalNext.y;
-            }
+            var horizontalNext = Vector2.SmoothDamp(
+                horizontalCurrent,
+                horizontalTarget,
+                ref avatar.HorizontalSmoothVelocity,
+                Mathf.Max(0.001f, remoteHorizontalSmoothTime),
+                remotePositionLerpSpeed * 2f,
+                Time.deltaTime);
+            var horizontalNextX = horizontalNext.x;
+            var horizontalNextZ = horizontalNext.y;
 
             var yDelta = Mathf.Abs(targetPosition.y - currentPosition.y);
             var yNext = yDelta >= verticalSnapDistance
                 ? targetPosition.y
-                : yDelta <= remoteDirectFollowDistance
-                    ? targetPosition.y
-                    : Mathf.SmoothDamp(
-                        currentPosition.y,
-                        targetPosition.y,
-                        ref avatar.VerticalSmoothVelocity,
-                        Mathf.Max(0.001f, remoteVerticalSmoothTime),
-                        remoteVerticalLerpSpeed * 2f,
-                        Time.deltaTime);
+                : Mathf.SmoothDamp(
+                    currentPosition.y,
+                    targetPosition.y,
+                    ref avatar.VerticalSmoothVelocity,
+                    Mathf.Max(0.001f, remoteVerticalSmoothTime),
+                    remoteVerticalLerpSpeed * 2f,
+                    Time.deltaTime);
 
             rootTransform.position = new Vector3(horizontalNextX, yNext, horizontalNextZ);
             var targetRotation = Quaternion.Euler(0f, targetYaw, 0f);
@@ -286,21 +286,71 @@ namespace ShooterPrototype.Player
 
         private void DriveRemoteLocomotion(RemoteAvatar avatar, InterpolatedPose pose)
         {
-            if (avatar?.LocomotionRig == null)
+            if (avatar?.Root == null)
             {
                 return;
             }
 
-            ResolveRemoteMoveInput(avatar, pose, out var moveInputX, out var moveInputZ);
-            avatar.LocomotionRig.SetNetworkMoveInput(moveInputX, moveInputZ);
-            avatar.LocomotionRig.SetNetworkAnimationState(
-                avatar.NetworkAnimSpeed,
-                avatar.NetworkGrounded,
-                avatar.NetworkJumpState,
-                avatar.NetworkAnimPhase,
-                avatar.NetworkCrouching,
-                avatar.NetworkSprinting);
-            avatar.LocomotionRig.SetNetworkLookPitch(avatar.NetworkLookPitch);
+            if (avatar.LocomotionRig != null)
+            {
+                ResolveRemoteMoveInput(avatar, pose, out var moveInputX, out var moveInputZ);
+
+                var dt = Mathf.Max(0.0001f, Time.deltaTime);
+                var moveTargetMag = moveInputX * moveInputX + moveInputZ * moveInputZ;
+                var moveCurrentMag = avatar.SmoothedMoveInputX * avatar.SmoothedMoveInputX +
+                                     avatar.SmoothedMoveInputZ * avatar.SmoothedMoveInputZ;
+                var moveSmooth = Mathf.Max(
+                    0.01f,
+                    moveTargetMag < moveCurrentMag ? remoteMoveStopSmoothTime : remoteMoveInputSmoothTime);
+                avatar.SmoothedMoveInputX = Mathf.SmoothDamp(
+                    avatar.SmoothedMoveInputX,
+                    moveInputX,
+                    ref avatar.MoveInputXSmoothVelocity,
+                    moveSmooth,
+                    Mathf.Infinity,
+                    dt);
+                avatar.SmoothedMoveInputZ = Mathf.SmoothDamp(
+                    avatar.SmoothedMoveInputZ,
+                    moveInputZ,
+                    ref avatar.MoveInputZSmoothVelocity,
+                    moveSmooth,
+                    Mathf.Infinity,
+                    dt);
+
+                var targetAnimSpeed = ResolveRemoteAnimatorSpeed01(avatar, pose);
+                var animSpeedSmooth = Mathf.Max(
+                    0.01f,
+                    targetAnimSpeed < avatar.SmoothedNetworkAnimSpeed
+                        ? remoteAnimStopSmoothTime
+                        : remoteAnimSpeedSmoothTime);
+                avatar.SmoothedNetworkAnimSpeed = Mathf.SmoothDamp(
+                    avatar.SmoothedNetworkAnimSpeed,
+                    targetAnimSpeed,
+                    ref avatar.AnimSpeedSmoothVelocity,
+                    animSpeedSmooth,
+                    Mathf.Infinity,
+                    dt);
+
+                avatar.LocomotionRig.DriveNetworkLocomotionFromVelocity(
+                    pose.Velocity,
+                    avatar.NetworkGrounded,
+                    avatar.NetworkJumpState,
+                    avatar.NetworkCrouching,
+                    avatar.NetworkSprinting);
+                avatar.LocomotionRig.SetNetworkMoveInput(avatar.SmoothedMoveInputX, avatar.SmoothedMoveInputZ);
+                avatar.LocomotionRig.SetNetworkAnimationState(
+                    avatar.SmoothedNetworkAnimSpeed,
+                    avatar.NetworkGrounded,
+                    avatar.NetworkJumpState,
+                    avatar.NetworkAnimPhase,
+                    avatar.NetworkCrouching,
+                    avatar.NetworkSprinting);
+                avatar.LocomotionRig.SetNetworkLookPitch(avatar.NetworkLookPitch);
+            }
+
+            var remoteWeapon = avatar.Root.GetComponent<RemoteWeaponPresentation>();
+            remoteWeapon?.SetNetworkLookPitch(avatar.NetworkLookPitch);
+            remoteWeapon?.SetNetworkCrouchState(avatar.NetworkCrouching);
         }
 
         private static void ResolveRemoteMoveInput(
@@ -311,8 +361,17 @@ namespace ShooterPrototype.Player
         {
             moveInputX = avatar.NetworkMoveInputX;
             moveInputZ = avatar.NetworkMoveInputZ;
-            if (Mathf.Abs(moveInputX) > 0.01f || Mathf.Abs(moveInputZ) > 0.01f)
+            var inputMag = moveInputX * moveInputX + moveInputZ * moveInputZ;
+            if (inputMag >= 0.04f)
             {
+                var moveDir = new Vector2(moveInputX, moveInputZ);
+                if (moveDir.sqrMagnitude > 1f)
+                {
+                    moveDir.Normalize();
+                    moveInputX = moveDir.x;
+                    moveInputZ = moveDir.y;
+                }
+
                 return;
             }
 
@@ -323,21 +382,78 @@ namespace ShooterPrototype.Player
                 return;
             }
 
+            if (avatar.NetworkSprinting)
+            {
+                moveInputX = 0f;
+                moveInputZ = 1f;
+                return;
+            }
+
             var flatVelocity = new Vector3(pose.Velocity.x, 0f, pose.Velocity.z);
-            if (flatVelocity.sqrMagnitude < 0.04f)
+            if (flatVelocity.sqrMagnitude >= 0.04f)
             {
-                return;
+                var localDirection = Quaternion.Euler(0f, -pose.Yaw, 0f) * flatVelocity;
+                var magnitude = new Vector2(localDirection.x, localDirection.z).magnitude;
+                if (magnitude > 0.01f)
+                {
+                    moveInputX = localDirection.x / magnitude;
+                    moveInputZ = localDirection.z / magnitude;
+                    return;
+                }
             }
 
-            var localDirection = Quaternion.Euler(0f, -pose.Yaw, 0f) * flatVelocity;
-            var magnitude = new Vector2(localDirection.x, localDirection.z).magnitude;
-            if (magnitude <= 0.01f)
+            moveInputX = 0f;
+            moveInputZ = 0f;
+        }
+
+        private static float ResolveRemoteAnimatorSpeed01(RemoteAvatar avatar, InterpolatedPose pose)
+        {
+            const float walkSpeedReference = 3.3f;
+            const float sprintSpeedReference = 5.94f;
+            const float crouchSpeedReference = 2.2f;
+
+            var speedReference = avatar.NetworkCrouching
+                ? crouchSpeedReference
+                : avatar.NetworkSprinting
+                    ? sprintSpeedReference
+                    : walkSpeedReference;
+
+            var networkSpeed01 = Mathf.Clamp(avatar.NetworkAnimSpeed, 0f, ProceduralLocomotionRig.MaxNetworkAnimSpeed01);
+            var inputMag = avatar.NetworkMoveInputX * avatar.NetworkMoveInputX + avatar.NetworkMoveInputZ * avatar.NetworkMoveInputZ;
+            if (networkSpeed01 <= 0.05f && inputMag < 0.04f)
             {
-                return;
+                return 0f;
             }
 
-            moveInputX = localDirection.x / magnitude;
-            moveInputZ = localDirection.z / magnitude;
+            if (inputMag >= 0.04f)
+            {
+                return networkSpeed01;
+            }
+
+            var horizontalSpeed = new Vector3(pose.Velocity.x, 0f, pose.Velocity.z).magnitude;
+
+            var velocitySpeed01 = Mathf.Clamp01(horizontalSpeed / Mathf.Max(0.01f, speedReference));
+
+            if (horizontalSpeed <= 0.05f)
+            {
+                return networkSpeed01;
+            }
+
+            if (networkSpeed01 <= 0.05f)
+            {
+                return velocitySpeed01;
+            }
+
+            var desync = Mathf.Abs(velocitySpeed01 - networkSpeed01);
+            if (desync <= 0.12f)
+            {
+                return networkSpeed01;
+            }
+
+            return Mathf.Clamp(
+                Mathf.Lerp(networkSpeed01, velocitySpeed01, 0.35f),
+                0f,
+                ProceduralLocomotionRig.MaxNetworkAnimSpeed01);
         }
 
         public void FlushLocalPose()
@@ -376,6 +492,16 @@ namespace ShooterPrototype.Player
             var lookPitch = localFpsController != null ? localFpsController.CurrentLookPitch : 0f;
             var shotOrigin = localWeaponController != null ? localWeaponController.LastShotOrigin : Vector3.zero;
             var shotDirection = localWeaponController != null ? localWeaponController.LastShotDirection : Vector3.zero;
+            var shotEndPoint = localWeaponController != null ? localWeaponController.LastShotEndPoint : Vector3.zero;
+            var shotHasEndPoint = localWeaponController != null && localWeaponController.LastShotHasEndPoint;
+            if (!shotHasEndPoint && localWeaponController != null && shotSeq > 0)
+            {
+                var travel = (shotEndPoint - shotOrigin).magnitude;
+                if (travel > 0.05f && travel <= localWeaponController.ShotMaxDistance + 1f)
+                {
+                    shotHasEndPoint = true;
+                }
+            }
             var animSpeed = localLocomotionRig != null
                 ? localLocomotionRig.GetNetworkAnimSpeed01()
                 : (localFpsController != null ? Mathf.Clamp01(localFpsController.MoveInputMagnitude) : 0f);
@@ -417,7 +543,14 @@ namespace ShooterPrototype.Player
                 jumpPressed,
                 inputAuth,
                 shotOrigin,
-                shotDirection);
+                shotDirection,
+                shotEndPoint,
+                shotHasEndPoint);
+        }
+
+        public void SendLocalPoseImmediate()
+        {
+            SendLocalPose();
         }
 
         private IEnumerator SyncRoutine()
@@ -477,6 +610,8 @@ namespace ShooterPrototype.Player
             var serverTick = snapshot.serverTick;
             if (serverTick > 0 && serverTick == lastAppliedServerTick)
             {
+                // Pose can change within the same server tick (e.g. shotSeq). Still play one-shot events.
+                ApplyRemotePresenceEvents(snapshot.players);
                 return;
             }
 
@@ -486,6 +621,40 @@ namespace ShooterPrototype.Player
             }
 
             ApplyRealtimeSnapshot(snapshot);
+        }
+
+        private void ApplyRemotePresenceEvents(RealtimeTransportClient.RealtimePlayerState[] players)
+        {
+            if (players == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < players.Length; i++)
+            {
+                var p = players[i];
+                if (p == null || string.IsNullOrWhiteSpace(p.ticketId))
+                {
+                    continue;
+                }
+
+                if (!remoteAvatars.TryGetValue(p.ticketId, out var avatar))
+                {
+                    continue;
+                }
+
+                ApplyRemotePresenceEventsForAvatar(avatar, p);
+            }
+        }
+
+        private void ApplyRemotePresenceEventsForAvatar(
+            RemoteAvatar avatar,
+            RealtimeTransportClient.RealtimePlayerState playerState)
+        {
+            TryPlayRemoteShots(avatar, playerState);
+            TryPlayRemoteReload(avatar, playerState);
+            TryPlayRemoteHitPlayer(avatar, playerState);
+            TryPlayRemoteFootsteps(avatar, playerState);
         }
 
         private void ApplyRealtimeSnapshot(RealtimeTransportClient.RealtimeSnapshot snapshot)
@@ -695,6 +864,9 @@ namespace ShooterPrototype.Player
                         avatar.LastAppliedHitPlayerSeq = Mathf.Max(0, p.hitPlayerSeq);
                         avatar.LastAppliedFootstepSeq = Mathf.Max(0, p.footstepSeq);
                         avatar.WasDead = p.isDead;
+                        avatar.SmoothedNetworkAnimSpeed = p.animSpeed;
+                        avatar.SmoothedMoveInputX = p.moveInputX;
+                        avatar.SmoothedMoveInputZ = p.moveInputZ;
                         remoteAvatars[p.ticketId] = avatar;
                     }
 
@@ -720,42 +892,11 @@ namespace ShooterPrototype.Player
                     avatar.NetworkMoveInputZ = p.moveInputZ;
                     IngestPlayerStateSamples(avatar, p);
 
-                    var weaponMount = avatar.Root.GetComponent<PlayerWeaponMount>();
-                    if (weaponMount != null)
-                    {
-                        weaponMount.SetNetworkLookPitch(p.lookPitch);
-                        weaponMount.SetNetworkAimState(false);
-                        weaponMount.SetNetworkCrouchState(p.isCrouching);
-                        weaponMount.SetNetworkSprintState(p.isSprinting);
-                        weaponMount.SetNetworkWallAvoidBlend(p.wallAvoidBlend);
-                    }
+                    var remoteWeapon = avatar.Root.GetComponent<RemoteWeaponPresentation>();
+                    remoteWeapon?.SetNetworkLookPitch(p.lookPitch);
+                    remoteWeapon?.SetNetworkCrouchState(p.isCrouching);
 
-                    TryPlayRemoteShots(avatar, p);
-                    TryPlayRemoteReload(avatar, p);
-                    TryPlayRemoteHitPlayer(avatar, p);
-                    TryPlayRemoteFootsteps(avatar, p);
-
-                    if (avatar.LocomotionRig != null)
-                    {
-                        ResolveRemoteMoveInput(
-                            avatar,
-                            new InterpolatedPose
-                            {
-                                Yaw = p.yaw,
-                                Velocity = new Vector3(p.velX, p.velY, p.velZ)
-                            },
-                            out var moveInputX,
-                            out var moveInputZ);
-                        avatar.LocomotionRig.SetNetworkMoveInput(moveInputX, moveInputZ);
-                        avatar.LocomotionRig.SetNetworkAnimationState(
-                            p.animSpeed,
-                            avatar.NetworkGrounded,
-                            avatar.NetworkJumpState,
-                            p.animPhase,
-                            avatar.NetworkCrouching,
-                            avatar.NetworkSprinting);
-                        avatar.LocomotionRig.SetNetworkLookPitch(p.lookPitch);
-                    }
+                    ApplyRemotePresenceEventsForAvatar(avatar, p);
 
                     avatar.Health?.SetNetworkDeadState(
                         p.isDead,
@@ -788,14 +929,24 @@ namespace ShooterPrototype.Player
                 Debug.Log($"[MatchPresenceSync] create avatar ticket={ticketId}");
             }
 
-            var presentation = root.GetComponent<PlayerViewPresentation>();
-            if (presentation != null)
+            var bootstrap = root.GetComponent<RemoteThirdPersonPlayerBootstrap>();
+            if (bootstrap != null)
             {
-                presentation.Configure(false);
+                bootstrap.ApplyRemoteThirdPersonMode();
             }
+            else
+            {
+                var thirdPersonBody = root.transform.Find("ThirdPersonBody");
+                var remoteWeapon = root.GetComponent<RemoteWeaponPresentation>();
+                if (remoteWeapon == null)
+                {
+                    remoteWeapon = root.AddComponent<RemoteWeaponPresentation>();
+                }
 
-            var splitBody = root.GetComponent<SyntySplitBodyPresentation>();
-            splitBody?.ApplyViewMode();
+                remoteWeapon.Configure(thirdPersonBody);
+                remoteWeapon.EnsureAttached();
+                EnsureRemoteVisuals(root);
+            }
 
             var identity = root.GetComponent<PlayerNetworkIdentity>();
             if (identity == null)
@@ -804,23 +955,23 @@ namespace ShooterPrototype.Player
             }
             identity.Configure(ticketId, false);
 
-            EnsureRemoteVisuals(root);
-
-            var remoteBootstrap = root.GetComponent<RemoteThirdPersonPlayerBootstrap>();
-            remoteBootstrap?.ApplyRemoteThirdPersonMode();
-
-            var fpsController = root.GetComponent<FpsCharacterController>();
-            if (fpsController != null)
+            if (root.GetComponent<RemotePlayerShotEffects>() == null)
             {
-                fpsController.enabled = false;
+                root.AddComponent<RemotePlayerShotEffects>();
             }
 
-            var weaponController = root.GetComponent<PlayerWeaponController>();
-            if (weaponController == null)
+            var shotEffects = root.GetComponent<RemotePlayerShotEffects>();
+            if (shotEffects != null && localWeaponController != null)
             {
-                weaponController = root.AddComponent<PlayerWeaponController>();
+                shotEffects.ApplyVisualSettings(
+                    localWeaponController.MuzzleFlashVfx,
+                    localWeaponController.WorldHitVfx,
+                    localWeaponController.PlayerHitVfx,
+                    localWeaponController.ShotMaxDistance);
             }
-            weaponController.enabled = false;
+
+            EnsureRemoteAudio(root);
+
             var health = root.GetComponent<PlayerHealth>();
             if (health == null)
             {
@@ -828,21 +979,6 @@ namespace ShooterPrototype.Player
             }
             health.SetNetworkMode(true);
             health.SetNetworkDeadState(false, 0, Vector3.forward);
-            if (root.GetComponent<PlayerAudioController>() == null)
-            {
-                root.AddComponent<PlayerAudioController>();
-            }
-
-            var weaponMount = root.GetComponent<PlayerWeaponMount>();
-            if (weaponMount != null)
-            {
-                weaponMount.SetNetworkMode(true);
-                weaponMount.SetNetworkLookPitch(0f);
-                weaponMount.SetNetworkAimState(false);
-                weaponMount.SetNetworkCrouchState(false);
-                weaponMount.SetNetworkWallAvoidBlend(0f);
-                weaponMount.SetNetworkSprintState(false);
-            }
 
             var locomotionRig = root.GetComponentInChildren<ProceduralLocomotionRig>(true);
             if (locomotionRig != null)
@@ -864,18 +1000,6 @@ namespace ShooterPrototype.Player
 
             // Keep CharacterController enabled on remote avatars so they are hittable by raycasts.
 
-            var cameras = root.GetComponentsInChildren<Camera>(true);
-            for (var i = 0; i < cameras.Length; i++)
-            {
-                cameras[i].enabled = false;
-            }
-
-            var listeners = root.GetComponentsInChildren<AudioListener>(true);
-            for (var i = 0; i < listeners.Length; i++)
-            {
-                listeners[i].enabled = false;
-            }
-
             return new RemoteAvatar
             {
                 Root = root,
@@ -895,27 +1019,124 @@ namespace ShooterPrototype.Player
                 return;
             }
 
-            if (playerState.shotSeq <= avatar.LastAppliedShotSeq)
+            var shotEffects = avatar.Root.GetComponent<RemotePlayerShotEffects>();
+            if (shotEffects == null)
+            {
+                shotEffects = avatar.Root.AddComponent<RemotePlayerShotEffects>();
+            }
+
+            if (shotEffects != null && localWeaponController != null)
+            {
+                shotEffects.ApplyVisualSettings(
+                    localWeaponController.MuzzleFlashVfx,
+                    localWeaponController.WorldHitVfx,
+                    localWeaponController.PlayerHitVfx,
+                    localWeaponController.ShotMaxDistance);
+            }
+
+            EnsureRemoteAudio(avatar.Root);
+
+            var playedAny = false;
+            if (playerState.recentShots != null && playerState.recentShots.Length > 0)
+            {
+                for (var i = 0; i < playerState.recentShots.Length; i++)
+                {
+                    var shotEvent = playerState.recentShots[i];
+                    if (shotEvent == null || shotEvent.seq <= avatar.LastAppliedShotSeq)
+                    {
+                        continue;
+                    }
+
+                    PlayRemoteShotEvent(shotEffects, shotEvent, playerState.lookPitch);
+                    avatar.LastAppliedShotSeq = shotEvent.seq;
+                    playedAny = true;
+                }
+            }
+
+            if (playedAny || playerState.shotSeq <= avatar.LastAppliedShotSeq)
             {
                 return;
             }
 
-            var weaponController = avatar.Root.GetComponent<PlayerWeaponController>();
-            if (weaponController == null)
+            PlayRemoteShotLegacy(shotEffects, playerState);
+            avatar.LastAppliedShotSeq = playerState.shotSeq;
+        }
+
+        private void PlayRemoteShotEvent(
+            RemotePlayerShotEffects shotEffects,
+            RealtimeTransportClient.RealtimeShotEvent shotEvent,
+            float lookPitch)
+        {
+            if (shotEffects == null || shotEvent == null)
             {
-                avatar.LastAppliedShotSeq = playerState.shotSeq;
                 return;
             }
 
-            var shotsToReplay = Mathf.Clamp(playerState.shotSeq - avatar.LastAppliedShotSeq, 1, 4);
+            var shotOrigin = new Vector3(shotEvent.originX, shotEvent.originY, shotEvent.originZ);
+            var shotDirection = new Vector3(shotEvent.dirX, shotEvent.dirY, shotEvent.dirZ);
+            var shotEndPoint = new Vector3(shotEvent.endX, shotEvent.endY, shotEvent.endZ);
+            var hasShotEndPoint = shotEvent.hasEndPoint;
+            if (!hasShotEndPoint && localWeaponController != null)
+            {
+                var travel = (shotEndPoint - shotOrigin).magnitude;
+                if (travel > 0.05f && travel <= localWeaponController.ShotMaxDistance + 1f)
+                {
+                    hasShotEndPoint = true;
+                }
+            }
+
+            shotEffects.PlayRemoteShot(
+                shotOrigin,
+                shotDirection,
+                shotEndPoint,
+                hasShotEndPoint,
+                lookPitch);
+        }
+
+        private void PlayRemoteShotLegacy(
+            RemotePlayerShotEffects shotEffects,
+            RealtimeTransportClient.RealtimePlayerState playerState)
+        {
+            if (shotEffects == null || playerState == null)
+            {
+                return;
+            }
+
             var shotOrigin = new Vector3(playerState.shotOriginX, playerState.shotOriginY, playerState.shotOriginZ);
             var shotDirection = new Vector3(playerState.shotDirX, playerState.shotDirY, playerState.shotDirZ);
-            for (var i = 0; i < shotsToReplay; i++)
+            var shotEndPoint = new Vector3(playerState.shotEndX, playerState.shotEndY, playerState.shotEndZ);
+            var hasShotEndPoint = playerState.shotHasEndPoint;
+            if (!hasShotEndPoint && localWeaponController != null)
             {
-                weaponController.PlayRemoteShot(shotOrigin, shotDirection, playerState.lookPitch);
+                var travel = (shotEndPoint - shotOrigin).magnitude;
+                if (travel > 0.05f && travel <= localWeaponController.ShotMaxDistance + 1f)
+                {
+                    hasShotEndPoint = true;
+                }
             }
 
-            avatar.LastAppliedShotSeq = playerState.shotSeq;
+            shotEffects.PlayRemoteShot(
+                shotOrigin,
+                shotDirection,
+                shotEndPoint,
+                hasShotEndPoint,
+                playerState.lookPitch);
+        }
+
+        private void EnsureRemoteAudio(GameObject remoteRoot)
+        {
+            if (remoteRoot == null || localAudioController == null)
+            {
+                return;
+            }
+
+            var remoteAudio = remoteRoot.GetComponent<PlayerAudioController>();
+            if (remoteAudio == null)
+            {
+                remoteAudio = remoteRoot.AddComponent<PlayerAudioController>();
+            }
+
+            remoteAudio.InheritFrom(localAudioController);
         }
 
         private void TryPlayRemoteReload(RemoteAvatar avatar, RealtimeTransportClient.RealtimePlayerState playerState)
@@ -930,11 +1151,8 @@ namespace ShooterPrototype.Player
                 return;
             }
 
-            var weaponController = avatar.Root.GetComponent<PlayerWeaponController>();
-            if (weaponController != null)
-            {
-                weaponController.PlayRemoteReload(weaponController.ReloadDurationSeconds);
-            }
+            var shotEffects = avatar.Root.GetComponent<RemotePlayerShotEffects>();
+            shotEffects?.PlayRemoteReload(shotEffects != null ? shotEffects.ReloadDurationSeconds : 1.8f);
 
             avatar.LastAppliedReloadSeq = playerState.reloadSeq;
         }
@@ -951,8 +1169,7 @@ namespace ShooterPrototype.Player
                 return;
             }
 
-            var weaponController = avatar.Root.GetComponent<PlayerWeaponController>();
-            weaponController?.PlayRemoteHitPlayer();
+            avatar.Root.GetComponent<RemotePlayerShotEffects>()?.PlayRemoteHitPlayer();
             avatar.LastAppliedHitPlayerSeq = playerState.hitPlayerSeq;
         }
 
@@ -968,12 +1185,12 @@ namespace ShooterPrototype.Player
                 return;
             }
 
-            var fps = avatar.Root.GetComponent<FpsCharacterController>();
+            var audio = avatar.Root.GetComponent<PlayerAudioController>();
             var maxReplay = playerState.isSprinting ? 6 : 3;
             var count = Mathf.Clamp(playerState.footstepSeq - avatar.LastAppliedFootstepSeq, 1, maxReplay);
             for (var i = 0; i < count; i++)
             {
-                fps?.PlayRemoteFootstep();
+                audio?.PlayFootstep(false, playerState.isSprinting);
             }
 
             avatar.LastAppliedFootstepSeq = playerState.footstepSeq;
@@ -1022,9 +1239,11 @@ namespace ShooterPrototype.Player
                     continue;
                 }
 
+                var isThirdPersonRenderer = thirdPersonRoot != null && r.transform.IsChildOf(thirdPersonRoot);
+                var isWeaponRenderer = IsRemoteWeaponRenderer(r.transform);
                 if (thirdPersonRoot != null)
                 {
-                    r.enabled = r.transform.IsChildOf(thirdPersonRoot);
+                    r.enabled = isThirdPersonRenderer || isWeaponRenderer;
                 }
                 else
                 {
@@ -1052,6 +1271,27 @@ namespace ShooterPrototype.Player
             {
                 Destroy(collider);
             }
+        }
+
+        private static bool IsRemoteWeaponRenderer(Transform rendererTransform)
+        {
+            if (rendererTransform == null)
+            {
+                return false;
+            }
+
+            var current = rendererTransform;
+            while (current != null)
+            {
+                if (string.Equals(current.name, "WeaponModel", System.StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                current = current.parent;
+            }
+
+            return false;
         }
 
         private void RemoveAvatar(string ticketId)

@@ -32,6 +32,7 @@ namespace ShooterPrototype.EditorTools
             try
             {
                 instance.name = "PlayerCleanRemote";
+                PlayerPrefabOptimization.StripRemoteThirdPersonPrefab(instance);
                 ConfigureRemoteThirdPersonPrefab(instance);
                 SavePrefab(instance, TargetPrefabPath);
                 AssignSpawnPrefabs(SourcePrefabPath, TargetPrefabPath);
@@ -58,86 +59,170 @@ namespace ShooterPrototype.EditorTools
                 bootstrap = root.AddComponent<RemoteThirdPersonPlayerBootstrap>();
             }
 
+            EnsureRemoteWeaponPresentation(root);
+            EnsureRemoteLeftHandIkBinder(root);
+            EnsureRemoteShotEffects(root);
             bootstrap.ApplyRemoteThirdPersonMode();
-            EnsureLineHitboxRig(root);
-            WireWeaponMountReferences(root);
+            EnsureBoneHitboxRig(root);
+            WireRemoteAnimatorController(root);
             RemoveLocalOnlyComponents(root);
-            WireNetworkDefaults(root);
         }
 
-        private static void WireWeaponMountReferences(GameObject root)
+        private static void EnsureRemoteShotEffects(GameObject root)
         {
-            var weaponMount = root.GetComponent<PlayerWeaponMount>();
-            if (weaponMount == null)
+            var sourcePrefab = AssetDatabase.LoadAssetAtPath<GameObject>(SourcePrefabPath);
+            var sourceWeaponController = sourcePrefab != null
+                ? sourcePrefab.GetComponentInChildren<PlayerWeaponController>(true)
+                : null;
+            var sourceAudioController = ResolveSourceAudioController(sourcePrefab);
+            PlayerPrefabOptimization.EnsureRemoteShotEffects(root, sourceWeaponController);
+            PlayerPrefabOptimization.EnsureRemoteAudio(root, sourceAudioController);
+        }
+
+        private static PlayerAudioController ResolveSourceAudioController(GameObject sourcePrefab)
+        {
+            var audio = sourcePrefab != null
+                ? sourcePrefab.GetComponentInChildren<PlayerAudioController>(true)
+                : null;
+            if (audio != null)
+            {
+                return audio;
+            }
+
+            var localPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PlayerCleanPrefabCreator.SourcePrefabPath);
+            return localPrefab != null ? localPrefab.GetComponent<PlayerAudioController>() : null;
+        }
+
+        private static void WireRemoteAnimatorController(GameObject root)
+        {
+            var bootstrap = root.GetComponent<RemoteThirdPersonPlayerBootstrap>();
+            if (bootstrap == null)
+            {
+                return;
+            }
+
+            var remoteController = SyntyAnimationSetup.LoadRemoteAnimatorControllerAsset();
+            if (remoteController == null)
+            {
+                Debug.LogWarning(
+                    "[PlayerRemotePrefabCreator] SyntyRemoteLocomotion.controller missing. " +
+                    "Run Rebuild Animation Controller (Blink local + Opsive remote) first.");
+                return;
+            }
+
+            bootstrap.SetRemoteAnimatorController(remoteController);
+
+            var serialized = new SerializedObject(bootstrap);
+            var controllerProperty = serialized.FindProperty("remoteAnimatorController");
+            if (controllerProperty != null)
+            {
+                controllerProperty.objectReferenceValue = remoteController;
+                serialized.ApplyModifiedPropertiesWithoutUndo();
+            }
+        }
+
+        private static void EnsureRemoteWeaponPresentation(GameObject root)
+        {
+            if (root == null)
             {
                 return;
             }
 
             var thirdPersonBody = FindChild(root.transform, "ThirdPersonBody");
-            var tpWeaponAnchor = thirdPersonBody != null ? FindChild(thirdPersonBody, "WeaponAnchor") : null;
-            var cameraPivot = root.transform.Find("CameraPivot");
-            if (tpWeaponAnchor == null)
+            var syntyVisual = thirdPersonBody != null ? FindChild(thirdPersonBody, "SyntyVisual") : null;
+            var handBone = syntyVisual != null ? FindChild(syntyVisual, "Hand_R") : null;
+            if (handBone == null)
             {
+                Debug.LogWarning("[PlayerRemotePrefabCreator] Hand_R not found; remote weapon target skipped.");
                 return;
             }
 
-            weaponMount.ConfigureWeaponParent(tpWeaponAnchor, cameraPivot);
-            weaponMount.SetFirstPersonRigidHandIk(false);
+            var attachTarget = RemoteWeaponPresentation.EnsureAttachTargetOnHand(handBone);
+            ClearWeaponModelsUnder(attachTarget);
+            PlayerWeaponMount.RemoveStrayWeaponModels(root.transform, attachTarget);
 
-            var serialized = new SerializedObject(weaponMount);
-            var weaponParentProperty = serialized.FindProperty("weaponParent");
-            if (weaponParentProperty != null)
-            {
-                weaponParentProperty.objectReferenceValue = tpWeaponAnchor;
-            }
+            var sourceMount = LoadSourceWeaponMount();
 
-            if (cameraPivot != null)
+            GameObject weaponPrefabAsset = null;
+            if (sourceMount != null)
             {
-                var cameraPivotProperty = serialized.FindProperty("cameraPivot");
-                if (cameraPivotProperty != null)
+                var sourceSerialized = new SerializedObject(sourceMount);
+                var weaponPrefabProperty = sourceSerialized.FindProperty("weaponPrefab");
+                if (weaponPrefabProperty != null)
                 {
-                    cameraPivotProperty.objectReferenceValue = cameraPivot;
+                    weaponPrefabAsset = weaponPrefabProperty.objectReferenceValue as GameObject;
                 }
             }
 
-            var hipLockProperty = serialized.FindProperty("hipLockToCameraPivot");
-            if (hipLockProperty != null)
+            var presentation = root.GetComponent<RemoteWeaponPresentation>();
+            if (presentation == null)
             {
-                hipLockProperty.boolValue = false;
+                presentation = root.AddComponent<RemoteWeaponPresentation>();
             }
 
+            var serialized = new SerializedObject(presentation);
+            SetSerializedReference(serialized, "weaponPrefab", weaponPrefabAsset);
+            SetSerializedReference(serialized, "attachTarget", attachTarget);
             serialized.ApplyModifiedPropertiesWithoutUndo();
         }
 
-        private static void EnsureLineHitboxRig(GameObject root)
+        private static void EnsureRemoteLeftHandIkBinder(GameObject root)
         {
-            var thirdPersonBody = FindChild(root.transform, "ThirdPersonBody");
-            if (thirdPersonBody == null)
+            if (root == null)
             {
                 return;
             }
 
-            var hitboxRig = root.GetComponent<PlayerLineHitboxRig>();
+            var binder = root.GetComponent<RemoteLeftHandIkBinder>();
+            if (binder == null)
+            {
+                binder = root.AddComponent<RemoteLeftHandIkBinder>();
+            }
+
+            binder.enabled = true;
+        }
+
+        private static PlayerWeaponMount LoadSourceWeaponMount()
+        {
+            var localPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(PlayerCleanPrefabCreator.SourcePrefabPath);
+            return localPrefab != null ? localPrefab.GetComponent<PlayerWeaponMount>() : null;
+        }
+
+        private static void EnsureBoneHitboxRig(GameObject root)
+        {
+            var thirdPersonBody = FindChild(root.transform, "ThirdPersonBody");
+            var syntyVisual = thirdPersonBody != null ? FindChild(thirdPersonBody, "SyntyVisual") : null;
+            if (syntyVisual == null)
+            {
+                return;
+            }
+
+            PlayerHitboxCleanup.RemoveLegacyLineHitboxes(root);
+
+            var hitboxRig = root.GetComponent<PlayerBoneHitboxRig>();
             if (hitboxRig == null)
             {
-                hitboxRig = root.AddComponent<PlayerLineHitboxRig>();
+                hitboxRig = root.AddComponent<PlayerBoneHitboxRig>();
             }
 
             var serialized = new SerializedObject(hitboxRig);
             SetSerializedProperty(serialized, "autoBuildOnAwake", true);
             SetSerializedProperty(serialized, "enableArmHitboxes", false);
-            SetSerializedProperty(serialized, "torsoRadius", 0.12f);
-            SetSerializedProperty(serialized, "neckRadius", 0.075f);
-            SetSerializedProperty(serialized, "armRadius", 0.065f);
-            SetSerializedProperty(serialized, "legRadius", 0.08f);
-            SetSerializedProperty(serialized, "headRadius", 0.12f);
-            SetSerializedReference(serialized, "shoulderAnchor", FindChild(thirdPersonBody, "ShoulderAnchor"));
-            SetSerializedReference(serialized, "hipAnchor", FindChild(thirdPersonBody, "HipAnchor"));
-            SetSerializedReference(serialized, "leftHandTarget", FindChild(thirdPersonBody, "LeftHandTarget"));
-            SetSerializedReference(serialized, "rightHandTarget", FindChild(thirdPersonBody, "RightHandTarget"));
-            SetSerializedReference(serialized, "leftFootTarget", FindChild(thirdPersonBody, "LeftFootTarget"));
-            SetSerializedReference(serialized, "rightFootTarget", FindChild(thirdPersonBody, "RightFootTarget"));
-            SetSerializedReference(serialized, "headCenter", FindChild(thirdPersonBody, "HeadTarget"));
+            SetSerializedReference(serialized, "syntyRoot", syntyVisual);
+            SetSerializedProperty(serialized, "headRadius", 0.13f);
+            SetSerializedProperty(serialized, "headCenterOffset", 0.045f);
+            SetSerializedProperty(serialized, "neckRadius", 0.06f);
+            SetSerializedProperty(serialized, "neckHeight", 0.16f);
+            SetSerializedProperty(serialized, "torsoRadius", 0.11f);
+            SetSerializedProperty(serialized, "torsoHeight", 0.3f);
+            SetSerializedProperty(serialized, "hipsRadius", 0.12f);
+            SetSerializedProperty(serialized, "hipsHeight", 0.23f);
+            SetSerializedProperty(serialized, "upperLegRadius", 0.07f);
+            SetSerializedProperty(serialized, "upperLegHeight", 0.41f);
+            SetSerializedProperty(serialized, "lowerLegRadius", 0.06f);
+            SetSerializedProperty(serialized, "lowerLegHeight", 0.39f);
+            SetSerializedProperty(serialized, "footRadius", 0.07f);
+            SetSerializedProperty(serialized, "footHeight", 0.18f);
             serialized.ApplyModifiedPropertiesWithoutUndo();
             hitboxRig.BuildOrRefreshHitboxes();
         }
@@ -154,37 +239,6 @@ namespace ShooterPrototype.EditorTools
             if (localMarker != null)
             {
                 Object.DestroyImmediate(localMarker);
-            }
-
-            var handBinder = root.GetComponent<SyntyWeaponHandBinder>();
-            if (handBinder != null)
-            {
-                handBinder.enabled = false;
-            }
-
-            var fpsController = root.GetComponent<FpsCharacterController>();
-            if (fpsController != null)
-            {
-                fpsController.enabled = false;
-            }
-        }
-
-        private static void WireNetworkDefaults(GameObject root)
-        {
-            var weaponMount = root.GetComponent<PlayerWeaponMount>();
-            if (weaponMount != null)
-            {
-                var serialized = new SerializedObject(weaponMount);
-                SetSerializedProperty(serialized, "hipLockToCameraPivot", false);
-                serialized.ApplyModifiedPropertiesWithoutUndo();
-            }
-
-            var viewPresentation = root.GetComponent<PlayerViewPresentation>();
-            if (viewPresentation != null)
-            {
-                var viewSerialized = new SerializedObject(viewPresentation);
-                SetSerializedProperty(viewSerialized, "isLocalPlayer", false);
-                viewSerialized.ApplyModifiedPropertiesWithoutUndo();
             }
         }
 
@@ -243,6 +297,24 @@ namespace ShooterPrototype.EditorTools
             if (property != null)
             {
                 property.objectReferenceValue = value;
+            }
+        }
+
+        private static void ClearWeaponModelsUnder(Transform parent)
+        {
+            if (parent == null)
+            {
+                return;
+            }
+
+            for (var i = parent.childCount - 1; i >= 0; i--)
+            {
+                var child = parent.GetChild(i);
+                if (child != null &&
+                    string.Equals(child.name, "WeaponModel", System.StringComparison.Ordinal))
+                {
+                    Object.DestroyImmediate(child.gameObject);
+                }
             }
         }
 

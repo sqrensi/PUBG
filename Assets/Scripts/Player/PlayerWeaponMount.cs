@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
@@ -26,6 +27,8 @@ namespace ShooterPrototype.Player
         [Header("Hand targets on weapon")]
         [SerializeField] private string leftHandTargetName = "LeftHandTarget";
         [SerializeField] private string rightHandTargetName = "RightHandTarget";
+        [SerializeField] private string remoteLeftHandTargetName = "RemoteLeftHandTarget";
+        [SerializeField] private string remoteRightHandTargetName = "RemoteRightHandTarget";
         [SerializeField] private string sightTargetName = "AimPoint";
         [SerializeField] private string reloadMagHandTargetName = "MagHandTarget";
         [SerializeField] private Vector3 reloadMagPullLocalOffset = new Vector3(0f, -0.28f, -0.42f);
@@ -156,6 +159,8 @@ namespace ShooterPrototype.Player
         private float adsCameraFovVelocity;
         private Transform leftHandTargetTransform;
         private Transform rightHandTargetTransform;
+        private Transform remoteLeftHandTargetTransform;
+        private Transform remoteRightHandTargetTransform;
         private Transform magHandTargetTransform;
         private Vector3 magHandTargetBaseLocalPos;
         private Coroutine reloadRoutine;
@@ -165,6 +170,11 @@ namespace ShooterPrototype.Player
 
         private void Awake()
         {
+            if (GetComponent<RemoteThirdPersonPlayerBootstrap>() != null)
+            {
+                return;
+            }
+
             EnsureWeaponMounted();
         }
 
@@ -172,13 +182,58 @@ namespace ShooterPrototype.Player
         public float AdsFollowPitchDownLimit => adsFollowPitchDownLimit;
         public Transform MountedWeaponRoot => weaponInstance != null ? weaponInstance.transform : null;
         public Transform WeaponAnchorTransform => weaponParent;
+
         public Transform RightHandGripTarget => rightHandTargetTransform;
         public Transform LeftHandGripTarget => leftHandTargetTransform;
+        public Transform RemoteRightHandGripTarget => remoteRightHandTargetTransform;
+        public Transform RemoteLeftHandGripTarget => remoteLeftHandTargetTransform;
+
+        public Transform ResolveRightHandGripTarget(bool forRemote)
+        {
+            if (forRemote && remoteRightHandTargetTransform != null)
+            {
+                return remoteRightHandTargetTransform;
+            }
+
+            return rightHandTargetTransform;
+        }
+
+        public Transform ResolveLeftHandGripTarget(bool forRemote)
+        {
+            if (forRemote && remoteLeftHandTargetTransform != null)
+            {
+                return remoteLeftHandTargetTransform;
+            }
+
+            return leftHandTargetTransform;
+        }
         public float CurrentWallAvoidBlend => Mathf.Clamp01(wallAvoidBlend);
 
         public void SetHandAttachedWeaponActive(bool active)
         {
             handAttachedWeaponActive = active;
+        }
+
+        public void EnsureMounted()
+        {
+            EnsureWeaponMounted();
+        }
+
+        public void SetThirdPersonWeaponRenderersEnabled(bool enabled)
+        {
+            if (weaponInstance == null)
+            {
+                return;
+            }
+
+            var renderers = weaponInstance.GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                if (renderers[i] != null)
+                {
+                    renderers[i].enabled = enabled;
+                }
+            }
         }
 
         public void ConfigureWeaponParent(Transform parent, Transform pivot = null)
@@ -194,6 +249,7 @@ namespace ShooterPrototype.Player
             }
 
             if (weaponInstance != null && weaponParent != null &&
+                !handAttachedWeaponActive &&
                 weaponInstance.transform.parent != weaponParent)
             {
                 weaponInstance.transform.SetParent(weaponParent, true);
@@ -290,6 +346,11 @@ namespace ShooterPrototype.Player
 
         private void OnEnable()
         {
+            if (GetComponent<RemoteThirdPersonPlayerBootstrap>() != null)
+            {
+                return;
+            }
+
             EnsureWeaponMounted();
         }
 
@@ -307,9 +368,13 @@ namespace ShooterPrototype.Player
                 return;
             }
 
-            if (handAttachedWeaponActive && !useNetworkState)
+            if (handAttachedWeaponActive)
             {
-                UpdateAdsCameraZoom();
+                if (!useNetworkState)
+                {
+                    UpdateAdsCameraZoom();
+                }
+
                 return;
             }
 
@@ -712,12 +777,97 @@ namespace ShooterPrototype.Player
             }
         }
 
-        private void EnsureWeaponMounted()
+        /// <summary>
+        /// Removes duplicate WeaponModel objects outside the managed attach hierarchy.
+        /// </summary>
+        public static void RemoveStrayWeaponModels(Transform searchRoot, Transform keepUnder = null)
         {
-            if (weaponInstance != null || weaponPrefab == null)
+            if (searchRoot == null)
             {
                 return;
             }
+
+            var transforms = searchRoot.GetComponentsInChildren<Transform>(true);
+            for (var i = transforms.Length - 1; i >= 0; i--)
+            {
+                var candidate = transforms[i];
+                if (!string.Equals(candidate.name, "WeaponModel", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (keepUnder != null && candidate.IsChildOf(keepUnder))
+                {
+                    continue;
+                }
+
+                DestroyWeaponModelObject(candidate.gameObject);
+            }
+        }
+
+        /// <summary>
+        /// Remote prefabs may bake a WeaponModel on the hand bone while this component also spawns one at runtime.
+        /// </summary>
+        public static void RemoveExtraWeaponModels(Transform searchRoot, GameObject keep = null)
+        {
+            if (searchRoot == null)
+            {
+                return;
+            }
+
+            var transforms = searchRoot.GetComponentsInChildren<Transform>(true);
+            for (var i = transforms.Length - 1; i >= 0; i--)
+            {
+                var candidate = transforms[i];
+                if (!string.Equals(candidate.name, "WeaponModel", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (keep != null && candidate.gameObject == keep)
+                {
+                    continue;
+                }
+
+                DestroyWeaponModelObject(candidate.gameObject);
+            }
+        }
+
+        private static void DestroyWeaponModelObject(GameObject weaponModel)
+        {
+            if (weaponModel == null)
+            {
+                return;
+            }
+
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+            {
+                UnityEngine.Object.DestroyImmediate(weaponModel);
+                return;
+            }
+#endif
+            Destroy(weaponModel);
+        }
+
+        private void EnsureWeaponMounted()
+        {
+            if (weaponInstance != null)
+            {
+                return;
+            }
+
+            if (weaponPrefab == null)
+            {
+                if (TryAdoptExistingWeaponModel())
+                {
+                    FinalizeWeaponMount(skipAnchorReposition: true);
+                }
+
+                return;
+            }
+
+            RemoveExtraWeaponModels(transform);
 
             var parent = weaponParent != null ? weaponParent : transform;
             weaponInstance = Instantiate(weaponPrefab, parent);
@@ -727,6 +877,44 @@ namespace ShooterPrototype.Player
             weaponInstance.transform.localScale = localScale;
             baseLocalPosition = weaponInstance.transform.localPosition;
             baseLocalRotation = weaponInstance.transform.localRotation;
+
+            FinalizeWeaponMount(skipAnchorReposition: false);
+            RemoveExtraWeaponModels(transform, weaponInstance);
+        }
+
+        private bool TryAdoptExistingWeaponModel()
+        {
+            var transforms = transform.GetComponentsInChildren<Transform>(true);
+            GameObject adopted = null;
+            for (var i = 0; i < transforms.Length; i++)
+            {
+                var candidate = transforms[i];
+                if (candidate == null ||
+                    !string.Equals(candidate.name, "WeaponModel", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                adopted = candidate.gameObject;
+            }
+
+            if (adopted == null)
+            {
+                return false;
+            }
+
+            weaponInstance = adopted;
+            baseLocalPosition = weaponInstance.transform.localPosition;
+            baseLocalRotation = weaponInstance.transform.localRotation;
+            return true;
+        }
+
+        private void FinalizeWeaponMount(bool skipAnchorReposition)
+        {
+            if (weaponInstance == null)
+            {
+                return;
+            }
 
             if (cameraPivot == null)
             {
@@ -760,7 +948,7 @@ namespace ShooterPrototype.Player
                 fpsController = GetComponent<FpsCharacterController>();
             }
 
-            if (weaponParent != null)
+            if (!skipAnchorReposition && weaponParent != null)
             {
                 weaponParent.localPosition = hipAnchorLocalPosition;
                 weaponParent.localRotation = Quaternion.Euler(hipAnchorLocalEuler);
@@ -781,17 +969,15 @@ namespace ShooterPrototype.Player
                 locomotionRig = GetComponentInChildren<ProceduralLocomotionRig>(true);
             }
 
-            if (locomotionRig == null)
-            {
-                return;
-            }
+            CacheWeaponHandTargets();
 
-            leftHandTargetTransform = FindChildRecursive(weaponInstance.transform, leftHandTargetName);
-            rightHandTargetTransform = FindChildRecursive(weaponInstance.transform, rightHandTargetName);
-            if (leftHandTargetTransform != null && rightHandTargetTransform != null)
+            if (locomotionRig != null &&
+                leftHandTargetTransform != null &&
+                rightHandTargetTransform != null)
             {
                 locomotionRig.SetHandAttachments(leftHandTargetTransform, rightHandTargetTransform);
             }
+
             magHandTargetTransform = FindReloadMagTarget(weaponInstance.transform);
             if (magHandTargetTransform != null)
             {
@@ -811,6 +997,70 @@ namespace ShooterPrototype.Player
                 sightLocalRotationOnAnchor = Quaternion.Inverse(weaponParent.rotation) * sightTarget.rotation;
                 hasSightCalibration = true;
             }
+        }
+
+        private void CacheWeaponHandTargets()
+        {
+            if (weaponInstance == null)
+            {
+                leftHandTargetTransform = null;
+                rightHandTargetTransform = null;
+                remoteLeftHandTargetTransform = null;
+                remoteRightHandTargetTransform = null;
+                return;
+            }
+
+            leftHandTargetTransform = FindChildRecursive(weaponInstance.transform, leftHandTargetName);
+            rightHandTargetTransform = FindChildRecursive(weaponInstance.transform, rightHandTargetName);
+
+            if (GetComponent<RemoteThirdPersonPlayerBootstrap>() != null)
+            {
+                remoteLeftHandTargetTransform = FindWeaponGripAnchor(
+                    weaponInstance.transform,
+                    remoteLeftHandTargetName);
+                remoteRightHandTargetTransform = FindWeaponGripAnchor(
+                    weaponInstance.transform,
+                    remoteRightHandTargetName);
+            }
+            else
+            {
+                remoteLeftHandTargetTransform = null;
+                remoteRightHandTargetTransform = null;
+            }
+        }
+
+        /// <summary>
+        /// Read-only lookup for grip anchors authored on the weapon prefab.
+        /// Prefers a direct child of the weapon root and never deletes or modifies transforms.
+        /// </summary>
+        internal static Transform FindWeaponGripAnchor(Transform weaponRoot, string anchorName)
+        {
+            if (weaponRoot == null || string.IsNullOrWhiteSpace(anchorName))
+            {
+                return null;
+            }
+
+            var directChild = weaponRoot.Find(anchorName);
+            if (directChild != null)
+            {
+                return directChild;
+            }
+
+            var all = weaponRoot.GetComponentsInChildren<Transform>(true);
+            for (var i = 0; i < all.Length; i++)
+            {
+                var candidate = all[i];
+                if (candidate == null ||
+                    candidate == weaponRoot ||
+                    !string.Equals(candidate.name, anchorName, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                return candidate;
+            }
+
+            return null;
         }
 
         private static Transform FindChildRecursive(Transform root, string childName)
@@ -1242,7 +1492,7 @@ namespace ShooterPrototype.Player
 
             if (collider.GetComponentInParent<CharacterController>(true) != null ||
                 collider.GetComponentInParent<FpsCharacterController>(true) != null ||
-                collider.GetComponentInParent<PlayerLineHitboxRig>(true) != null)
+                collider.GetComponentInParent<PlayerBoneHitboxRig>(true) != null)
             {
                 return true;
             }

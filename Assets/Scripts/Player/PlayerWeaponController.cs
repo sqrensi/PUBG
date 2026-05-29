@@ -80,6 +80,8 @@ namespace ShooterPrototype.Player
         private int hitPlayerSequence;
         private Vector3 lastShotOrigin;
         private Vector3 lastShotDirection = Vector3.forward;
+        private Vector3 lastShotEndPoint;
+        private bool lastShotHasEndPoint;
         private int currentAmmo;
         private bool isReloading;
         private Coroutine reloadCoroutine;
@@ -100,12 +102,18 @@ namespace ShooterPrototype.Player
         public int LastShotSequence => shotSequence;
         public Vector3 LastShotOrigin => lastShotOrigin;
         public Vector3 LastShotDirection => lastShotDirection;
+        public Vector3 LastShotEndPoint => lastShotEndPoint;
+        public bool LastShotHasEndPoint => lastShotHasEndPoint;
         public int LastReloadSequence => reloadSequence;
         public int LastHitPlayerSequence => hitPlayerSequence;
         public int CurrentAmmo => currentAmmo;
         public int MagazineSize => Mathf.Max(1, magazineSize);
         public bool IsReloading => isReloading;
         public float ReloadDurationSeconds => Mathf.Max(0.05f, reloadDuration);
+        public GameObject MuzzleFlashVfx => muzzleFlashVfx;
+        public GameObject WorldHitVfx => worldHitVfx;
+        public GameObject PlayerHitVfx => playerHitVfx;
+        public float ShotMaxDistance => maxDistance;
 
         private void Awake()
         {
@@ -200,12 +208,15 @@ namespace ShooterPrototype.Player
             TryResolveRuntimeMuzzle();
 
             var origin = muzzle != null ? muzzle.position : transform.position + transform.forward * 0.2f;
-            var direction = ResolveShootDirection(origin);
+            TryResolveCameraAim(origin, out var aim);
             lastShotOrigin = origin;
-            lastShotDirection = direction;
+            lastShotDirection = aim.ShootDirection;
             shotSequence++;
             currentAmmo = Mathf.Max(0, currentAmmo - 1);
-            SimulateShotEffects(origin, direction, applyRecoil: true);
+            SimulateShotEffects(origin, aim, applyRecoil: true);
+            CaptureNetworkShotImpact(origin, aim);
+            SendNetworkShotEvent();
+            GetComponent<MatchPresenceSync>()?.SendLocalPoseImmediate();
             audioController?.PlayShot(true);
             if (autoReloadWhenEmpty && currentAmmo <= 0)
             {
@@ -225,7 +236,7 @@ namespace ShooterPrototype.Player
             var direction = hasNetworkShot
                 ? networkDirection.normalized
                 : ResolveRemoteShootDirection(lookPitch);
-            SimulateShotEffects(origin, direction, applyRecoil: false);
+            SimulateShotEffects(origin, BuildAimFromShootRay(origin, direction), applyRecoil: false);
             audioController?.PlayShot(false);
         }
 
@@ -253,23 +264,146 @@ namespace ShooterPrototype.Player
             weaponMount?.SetLocalReloading(false);
         }
 
-        private Vector3 ResolveShootDirection(Vector3 muzzleOrigin)
+        private struct CameraAimResolution
         {
+            public Vector3 AimPoint;
+            public Vector3 ShootDirection;
+            public bool HasCameraHit;
+            public RaycastHit CameraHit;
+        }
+
+        private bool TryResolveCameraAim(Vector3 muzzleOrigin, out CameraAimResolution result)
+        {
+            result = new CameraAimResolution
+            {
+                AimPoint = muzzleOrigin + transform.forward * maxDistance,
+                ShootDirection = transform.forward,
+                HasCameraHit = false
+            };
+
             if (playerCamera == null)
             {
-                return transform.forward;
+                var fallbackDir = result.AimPoint - muzzleOrigin;
+                result.ShootDirection = fallbackDir.sqrMagnitude > 0.00001f
+                    ? fallbackDir.normalized
+                    : transform.forward;
+                return false;
             }
 
             var ray = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
             ray = ApplySpreadToRay(ray);
-            var target = ray.origin + ray.direction * maxDistance;
-            if (TryRaycastIgnoringSelf(ray, maxDistance, out var hit))
+            result.AimPoint = ray.origin + ray.direction * maxDistance;
+            if (TryRaycastCameraCrosshair(ray, maxDistance, out var hit))
             {
-                target = hit.point;
+                result.HasCameraHit = true;
+                result.CameraHit = hit;
+                result.AimPoint = hit.point;
             }
 
-            var shootDir = (target - muzzleOrigin);
-            return shootDir.sqrMagnitude > 0.00001f ? shootDir.normalized : transform.forward;
+            var shootDir = result.AimPoint - muzzleOrigin;
+            result.ShootDirection = shootDir.sqrMagnitude > 0.00001f ? shootDir.normalized : transform.forward;
+            return result.HasCameraHit;
+        }
+
+        private void SendNetworkShotEvent()
+        {
+            if (realtimeClient == null)
+            {
+                realtimeClient = FindObjectOfType<RealtimeTransportClient>();
+            }
+
+            realtimeClient?.SendShotEvent(
+                shotSequence,
+                lastShotOrigin,
+                lastShotDirection,
+                lastShotEndPoint,
+                lastShotHasEndPoint);
+        }
+
+        private void CaptureNetworkShotImpact(Vector3 muzzleOrigin, CameraAimResolution aim)
+        {
+            if (TryResolveNetworkImpactPoint(out var networkImpactPoint))
+            {
+                lastShotEndPoint = networkImpactPoint;
+                lastShotHasEndPoint = true;
+                return;
+            }
+
+            if (aim.HasCameraHit)
+            {
+                lastShotEndPoint = aim.AimPoint;
+                lastShotHasEndPoint = true;
+                return;
+            }
+
+            lastShotHasEndPoint = false;
+            lastShotEndPoint = muzzleOrigin + aim.ShootDirection * maxDistance;
+        }
+
+        private bool TryResolveNetworkImpactPoint(out Vector3 impactPoint)
+        {
+            impactPoint = default;
+            if (playerCamera == null)
+            {
+                return false;
+            }
+
+            // Network uses crosshair center without spread so observers match the reticle.
+            var ray = playerCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            if (!TryRaycastCameraCrosshair(ray, maxDistance, out var hit))
+            {
+                return false;
+            }
+
+            impactPoint = hit.point;
+            return true;
+        }
+
+        private bool TryRaycastCameraCrosshair(Ray ray, float distance, out RaycastHit closestHit)
+        {
+            var hitCount = Physics.RaycastNonAlloc(
+                ray,
+                hitQueryBuffer,
+                distance,
+                hitMask,
+                QueryTriggerInteraction.Ignore);
+            if (hitCount > 0)
+            {
+                System.Array.Sort(hitQueryBuffer, 0, hitCount, RaycastHitDistanceComparer.Instance);
+                for (var i = 0; i < hitCount; i++)
+                {
+                    var hit = hitQueryBuffer[i];
+                    if (hit.collider == null || hit.collider.transform.IsChildOf(transform))
+                    {
+                        continue;
+                    }
+
+                    closestHit = hit;
+                    return true;
+                }
+            }
+
+            return TryRaycastIgnoringSelf(ray, distance, out closestHit);
+        }
+
+        private CameraAimResolution BuildAimFromShootRay(Vector3 origin, Vector3 direction)
+        {
+            var normalizedDirection = direction.sqrMagnitude > 0.0001f ? direction.normalized : transform.forward;
+            var result = new CameraAimResolution
+            {
+                AimPoint = origin + normalizedDirection * maxDistance,
+                ShootDirection = normalizedDirection,
+                HasCameraHit = false
+            };
+
+            if (TryRaycastIgnoringSelf(new Ray(origin, normalizedDirection), maxDistance, out var hit))
+            {
+                result.HasCameraHit = true;
+                result.CameraHit = hit;
+                result.AimPoint = hit.point;
+            }
+
+            return result;
         }
 
         private void UpdateBurstState()
@@ -361,24 +495,47 @@ namespace ShooterPrototype.Player
             return (spread, recoil);
         }
 
-        private void SimulateShotEffects(Vector3 origin, Vector3 direction, bool applyRecoil)
+        private void SimulateShotEffects(Vector3 origin, CameraAimResolution aim, bool applyRecoil)
         {
-            var endPoint = origin + direction * maxDistance;
+            var direction = aim.ShootDirection;
             SpawnVfx(muzzleFlashVfx, origin, Quaternion.LookRotation(direction, Vector3.up));
             if (applyRecoil)
             {
                 ApplyRecoilKick();
             }
 
+            RaycastHit? gameplayHit = null;
             if (TryRaycastIgnoringSelf(new Ray(origin, direction), maxDistance, out var hit))
             {
-                endPoint = hit.point;
-                SpawnHitVfx(hit, direction, applyRecoil);
+                gameplayHit = hit;
+                ProcessGameplayHit(hit, direction, applyRecoil);
+            }
+
+            RaycastHit? visualHit = null;
+            Vector3 visualEndPoint;
+            if (aim.HasCameraHit)
+            {
+                visualHit = aim.CameraHit;
+                visualEndPoint = aim.AimPoint;
+            }
+            else if (gameplayHit.HasValue)
+            {
+                visualHit = gameplayHit.Value;
+                visualEndPoint = gameplayHit.Value.point;
+            }
+            else
+            {
+                visualEndPoint = origin + direction * maxDistance;
+            }
+
+            if (visualHit.HasValue)
+            {
+                SpawnVisualImpactVfx(visualHit.Value, direction);
             }
 
             if (showTracer)
             {
-                StartCoroutine(SpawnTracer(origin, endPoint));
+                StartCoroutine(SpawnTracer(origin, visualEndPoint));
             }
         }
 
@@ -393,41 +550,39 @@ namespace ShooterPrototype.Player
             return forwardWithPitch.sqrMagnitude > 0.00001f ? forwardWithPitch.normalized : transform.forward;
         }
 
-        private void SpawnHitVfx(RaycastHit hit, Vector3 shotDirection, bool notifyNetworkHit)
+        private void ProcessGameplayHit(RaycastHit hit, Vector3 shotDirection, bool notifyNetworkHit)
         {
             var hitZone = ResolveHitZone(hit.collider);
             var playerHit = IsPlayerHit(hit.collider);
-            var registerThisHit = !playerHit || ShouldRegisterHitOnce(hit.collider, hitZone);
-            var targetVfx = playerHit ? playerHitVfx : worldHitVfx;
-            if (targetVfx == null)
+            if (!playerHit)
             {
-                if (playerHit)
-                {
-                    if (registerThisHit)
-                    {
-                        TryPlayHeadshotAudio(hitZone);
-                        if (notifyNetworkHit)
-                        {
-                            TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone, hit.point);
-                        }
-                    }
-                }
                 return;
             }
 
-            var normal = hit.normal.sqrMagnitude > 0.0001f ? hit.normal : -hit.transform.forward;
-            SpawnVfx(targetVfx, hit.point, Quaternion.LookRotation(normal, Vector3.up));
-            if (playerHit)
+            var registerThisHit = ShouldRegisterHitOnce(hit.collider, hitZone);
+            if (!registerThisHit)
             {
-                if (registerThisHit)
-                {
-                    TryPlayHeadshotAudio(hitZone);
-                    if (notifyNetworkHit)
-                    {
-                        TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone, hit.point);
-                    }
-                }
+                return;
             }
+
+            TryPlayHeadshotAudio(hitZone);
+            if (notifyNetworkHit)
+            {
+                TrySendPlayerHitToServer(hit.collider, shotDirection, hitZone, hit.point);
+            }
+        }
+
+        private void SpawnVisualImpactVfx(RaycastHit hit, Vector3 shotDirection)
+        {
+            var playerHit = IsPlayerHit(hit.collider);
+            var targetVfx = playerHit ? playerHitVfx : worldHitVfx;
+            if (targetVfx == null)
+            {
+                return;
+            }
+
+            var normal = hit.normal.sqrMagnitude > 0.0001f ? hit.normal : -shotDirection;
+            SpawnVfx(targetVfx, hit.point, Quaternion.LookRotation(normal, Vector3.up));
         }
 
         private bool ShouldRegisterHitOnce(Collider targetCollider, HitZone hitZone)
@@ -472,8 +627,46 @@ namespace ShooterPrototype.Player
                 return false;
             }
 
-            return targetCollider.GetComponentInParent<FpsCharacterController>() != null ||
-                   targetCollider.GetComponentInParent<PlayerNetworkIdentity>() != null;
+            if (targetCollider.GetComponentInParent<FpsCharacterController>() != null)
+            {
+                return true;
+            }
+
+            var identity = targetCollider.GetComponentInParent<PlayerNetworkIdentity>();
+            if (identity == null || identity.IsLocalPlayer)
+            {
+                return false;
+            }
+
+            if (IsRemoteWeaponCollider(targetCollider))
+            {
+                return false;
+            }
+
+            if (targetCollider.GetComponentInParent<PlayerBoneHitbox>(true) != null)
+            {
+                return true;
+            }
+
+            return targetCollider.GetComponent<CharacterController>() != null;
+        }
+
+        private static bool IsRemoteWeaponCollider(Collider targetCollider)
+        {
+            var current = targetCollider != null ? targetCollider.transform : null;
+            while (current != null)
+            {
+                var name = current.name;
+                if (string.Equals(name, "WeaponModel", System.StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "RemoteWeaponTarget", System.StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                current = current.parent;
+            }
+
+            return false;
         }
 
         private float ResolveDamage(HitZone hitZone)
@@ -496,6 +689,22 @@ namespace ShooterPrototype.Player
             if (targetCollider == null)
             {
                 return HitZone.Body;
+            }
+
+            var boneHitbox = targetCollider.GetComponentInParent<PlayerBoneHitbox>(true);
+            if (boneHitbox != null)
+            {
+                switch (boneHitbox.HitZone)
+                {
+                    case PlayerBoneHitZone.Head:
+                        return HitZone.Head;
+                    case PlayerBoneHitZone.Neck:
+                        return HitZone.Neck;
+                    case PlayerBoneHitZone.Leg:
+                        return HitZone.Leg;
+                    default:
+                        return HitZone.Body;
+                }
             }
 
             var current = targetCollider.transform;
@@ -560,6 +769,7 @@ namespace ShooterPrototype.Player
             }
 
             System.Array.Sort(hitQueryBuffer, 0, hitCount, RaycastHitDistanceComparer.Instance);
+            RaycastHit? fallbackHit = null;
             for (var i = 0; i < hitCount; i++)
             {
                 var hit = hitQueryBuffer[i];
@@ -573,7 +783,21 @@ namespace ShooterPrototype.Player
                     continue;
                 }
 
-                closestHit = hit;
+                if (fallbackHit == null)
+                {
+                    fallbackHit = hit;
+                }
+
+                if (hit.collider.GetComponentInParent<PlayerBoneHitbox>(true) != null)
+                {
+                    closestHit = hit;
+                    return true;
+                }
+            }
+
+            if (fallbackHit.HasValue)
+            {
+                closestHit = fallbackHit.Value;
                 return true;
             }
 
@@ -636,9 +860,28 @@ namespace ShooterPrototype.Player
             }
 
             var instance = Instantiate(prefab, position, rotation);
+            PlayAllParticleSystems(instance);
             if (vfxAutoDestroySeconds > 0f)
             {
                 Destroy(instance, vfxAutoDestroySeconds);
+            }
+        }
+
+        private static void PlayAllParticleSystems(GameObject root)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            var systems = root.GetComponentsInChildren<ParticleSystem>(true);
+            for (var i = 0; i < systems.Length; i++)
+            {
+                var ps = systems[i];
+                if (ps != null)
+                {
+                    ps.Play(true);
+                }
             }
         }
 
@@ -707,16 +950,24 @@ namespace ShooterPrototype.Player
                 return;
             }
 
+            Transform weaponRoot = null;
+
             if (weaponMount == null)
             {
                 weaponMount = GetComponent<PlayerWeaponMount>();
-                if (weaponMount == null)
-                {
-                    return;
-                }
             }
 
-            var weaponRoot = weaponMount.MountedWeaponRoot;
+            if (weaponMount != null)
+            {
+                weaponRoot = weaponMount.MountedWeaponRoot;
+            }
+
+            if (weaponRoot == null)
+            {
+                var remoteWeapon = GetComponent<RemoteWeaponPresentation>();
+                weaponRoot = remoteWeapon != null ? remoteWeapon.WeaponRoot : null;
+            }
+
             if (weaponRoot == null)
             {
                 return;

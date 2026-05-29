@@ -106,6 +106,38 @@ namespace ShooterPrototype.Player
             PlayClip(nearSource, hitPlayerClip, hitPlayerVolume, isLocal, defaultMaxDistance);
         }
 
+        public void InheritFrom(PlayerAudioController source)
+        {
+            if (source == null || ReferenceEquals(source, this))
+            {
+                return;
+            }
+
+            footstepClips = source.footstepClips;
+            sprintFootstepClips = source.sprintFootstepClips;
+            remoteFootstepClips = source.remoteFootstepClips;
+            jumpClip = source.jumpClip;
+            shotClip = source.shotClip;
+            reloadPullClip = source.reloadPullClip;
+            reloadInsertClip = source.reloadInsertClip;
+            remoteReloadClip = source.remoteReloadClip;
+            hitPlayerClip = source.hitPlayerClip;
+            masterVolume = source.masterVolume;
+            footstepVolume = source.footstepVolume;
+            sprintFootstepVolumeMultiplier = source.sprintFootstepVolumeMultiplier;
+            jumpVolume = source.jumpVolume;
+            shotVolume = source.shotVolume;
+            reloadPullVolume = source.reloadPullVolume;
+            reloadInsertVolume = source.reloadInsertVolume;
+            reloadInsertNormalizedTime = source.reloadInsertNormalizedTime;
+            hitPlayerVolume = source.hitPlayerVolume;
+            remoteShotVolumeMultiplier = source.remoteShotVolumeMultiplier;
+            remoteReloadVolumeMultiplier = source.remoteReloadVolumeMultiplier;
+            defaultMinDistance = source.defaultMinDistance;
+            defaultMaxDistance = source.defaultMaxDistance;
+            shotMaxDistance = source.shotMaxDistance;
+        }
+
         private AudioSource CreateSource(string name, float maxDistance)
         {
             var child = new GameObject(name);

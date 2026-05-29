@@ -11,6 +11,7 @@ namespace ShooterPrototype.Player
     {
         [Header("Mode")]
         [SerializeField] private bool attachWeaponToHandsInFirstPerson = false;
+        [SerializeField] private bool attachWeaponToHandsForRemote = false;
 
         [Header("Hand Bones")]
         [SerializeField] private Transform primaryHandBone;
@@ -42,6 +43,51 @@ namespace ShooterPrototype.Player
                     ? primaryHandBone
                     : FindBone(syntyVisualRoot, "Hand_R");
             }
+        }
+
+        public void ConfigureForRemote(Transform syntyVisualRoot, PlayerWeaponMount mount, Transform rightHandBone)
+        {
+            weaponMount = mount;
+            attachWeaponToHandsInFirstPerson = false;
+            attachWeaponToHandsForRemote = true;
+            alignGripTargetToHand = true;
+            primaryHandBone = rightHandBone != null
+                ? rightHandBone
+                : (syntyVisualRoot != null ? FindBone(syntyVisualRoot, "Hand_R", "mixamorig:RightHand") : null);
+            enabled = true;
+        }
+
+        public void TryAttachNow()
+        {
+            if (weaponMount == null)
+            {
+                weaponMount = GetComponent<PlayerWeaponMount>();
+            }
+
+            weaponMount?.EnsureMounted();
+
+            if (!ShouldAttachWeaponToHands())
+            {
+                return;
+            }
+
+            weaponMount?.SetHandAttachedWeaponActive(true);
+
+            if (!isAttached)
+            {
+                AttachWeaponToHand();
+            }
+            else
+            {
+                MaintainWeaponOnHand();
+            }
+
+            EnableWeaponRenderers(true);
+        }
+
+        private void EnableWeaponRenderers(bool enabled)
+        {
+            weaponMount?.SetThirdPersonWeaponRenderersEnabled(enabled);
         }
 
         private void Awake()
@@ -95,9 +141,24 @@ namespace ShooterPrototype.Player
             MaintainWeaponOnHand();
         }
 
+        private bool UsesRemoteHandAttach()
+        {
+            return attachWeaponToHandsForRemote && GetComponent<RemoteThirdPersonPlayerBootstrap>() != null;
+        }
+
         private bool ShouldAttachWeaponToHands()
         {
-            if (!attachWeaponToHandsInFirstPerson || primaryHandBone == null)
+            if (primaryHandBone == null || weaponMount == null)
+            {
+                return false;
+            }
+
+            if (UsesRemoteHandAttach())
+            {
+                return true;
+            }
+
+            if (!attachWeaponToHandsInFirstPerson)
             {
                 return false;
             }
@@ -137,7 +198,7 @@ namespace ShooterPrototype.Player
 
             if (alignGripTargetToHand)
             {
-                var grip = weaponMount.RightHandGripTarget;
+                var grip = weaponMount.ResolveRightHandGripTarget(UsesRemoteHandAttach());
                 if (grip != null)
                 {
                     weapon.position += primaryHandBone.position - grip.position;
@@ -156,6 +217,7 @@ namespace ShooterPrototype.Player
             }
 
             isAttached = true;
+            EnableWeaponRenderers(true);
         }
 
         private void MaintainWeaponOnHand()
@@ -216,7 +278,7 @@ namespace ShooterPrototype.Player
                 for (var i = 0; i < all.Length; i++)
                 {
                     var current = all[i];
-                    if (current != null && string.Equals(current.name, boneName, System.StringComparison.Ordinal))
+                    if (current != null && string.Equals(current.name, boneName, System.StringComparison.OrdinalIgnoreCase))
                     {
                         return current;
                     }

@@ -153,7 +153,7 @@ namespace ShooterPrototype.Player
 
             if (target.GetComponentInParent<FpsCharacterController>(true) != null ||
                 target.GetComponentInParent<PlayerWeaponMount>(true) != null ||
-                target.GetComponentInParent<PlayerLineHitboxRig>(true) != null)
+                target.GetComponentInParent<PlayerBoneHitboxRig>(true) != null)
             {
                 return true;
             }

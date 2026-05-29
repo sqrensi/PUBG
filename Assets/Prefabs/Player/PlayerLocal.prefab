@@ -813,7 +813,6 @@ GameObject:
   - component: {fileID: 917748636057696848}
   - component: {fileID: 9095073036274879017}
   - component: {fileID: 2939252437644229280}
-  - component: {fileID: 1948830218482690036}
   - component: {fileID: 5725996226723598090}
   m_Layer: 0
   m_Name: PlayerLocal
@@ -1146,35 +1145,6 @@ MonoBehaviour:
   defaultMinDistance: 1
   defaultMaxDistance: 14
   shotMaxDistance: 50
---- !u!114 &1948830218482690036
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 4673309244235424808}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 70905c95992df91499a06096ef70ebb2, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::ShooterPrototype.Player.PlayerLineHitboxRig
-  autoBuildOnAwake: 1
-  hitboxRootName: HitboxesRoot
-  setAsTrigger: 1
-  hitboxLayer: -1
-  torsoRadius: 0.12
-  neckRadius: 0.075
-  armRadius: 0.065
-  legRadius: 0.08
-  headRadius: 0.12
-  enableArmHitboxes: 0
-  shoulderAnchor: {fileID: 4604566165866560641}
-  hipAnchor: {fileID: 8830067093150383832}
-  leftHandTarget: {fileID: 1241446323252395147}
-  rightHandTarget: {fileID: 9206958167000308987}
-  leftFootTarget: {fileID: 8800737303980801224}
-  rightFootTarget: {fileID: 3896123291731545803}
-  headCenter: {fileID: 6325050381569117639}
 --- !u!114 &5725996226723598090
 MonoBehaviour:
   m_ObjectHideFlags: 0

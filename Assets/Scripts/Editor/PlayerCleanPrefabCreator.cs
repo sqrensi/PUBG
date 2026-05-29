@@ -92,6 +92,7 @@ namespace ShooterPrototype.EditorTools
 
                 SyntyAnimationSetup.WireMecanimComponents(instance, FirstPersonArmsCoverage.ArmsWithoutShoulders);
                 SyntyPlayerPrefabCreator.RestoreActiveCharacterMeshesForPrefabSave(instance);
+                PlayerPrefabOptimization.StripLocalFirstPersonPrefab(instance);
                 SavePrefab(instance, prefabPath);
             }
             finally
@@ -132,6 +133,7 @@ namespace ShooterPrototype.EditorTools
             {
                 instance.name = "PlayerClean";
                 StripProceduralVisuals(instance);
+                PlayerPrefabOptimization.StripLocalFirstPersonPrefab(instance);
                 StripHitDetection(instance);
                 WireGameplayReferences(instance);
                 SavePrefab(instance, TargetPrefabPath);
@@ -208,29 +210,13 @@ namespace ShooterPrototype.EditorTools
                 return;
             }
 
-            DestroyNamedObjects(playerRoot.transform, "HitboxesRoot");
+            PlayerHitboxCleanup.RemoveLegacyLineHitboxes(playerRoot);
 
-            var hitChildren = playerRoot.GetComponentsInChildren<Transform>(true);
-            for (var i = hitChildren.Length - 1; i >= 0; i--)
+            var boneHitboxRig = playerRoot.GetComponent<PlayerBoneHitboxRig>();
+            if (boneHitboxRig != null)
             {
-                var child = hitChildren[i];
-                if (child == null || child == playerRoot.transform)
-                {
-                    continue;
-                }
-
-                if (!child.name.EndsWith("Hitbox", System.StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                Object.DestroyImmediate(child.gameObject);
-            }
-
-            var lineHitboxRig = playerRoot.GetComponent<PlayerLineHitboxRig>();
-            if (lineHitboxRig != null)
-            {
-                Object.DestroyImmediate(lineHitboxRig);
+                boneHitboxRig.RemoveHitboxes();
+                Object.DestroyImmediate(boneHitboxRig);
             }
         }
 

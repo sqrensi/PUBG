@@ -305,6 +305,11 @@ wsServer.on("connection", (socket) => {
       return;
     }
 
+    if (message.type === "shot") {
+      handleWsShot(socket, message);
+      return;
+    }
+
     if (message.type === "hit") {
       handleWsHit(socket, message);
       return;
@@ -659,6 +664,10 @@ function handleWsPose(socket, message) {
   const shotDirX = normalizeNumber(message.shotDirX, 0);
   const shotDirY = normalizeNumber(message.shotDirY, 0);
   const shotDirZ = normalizeNumber(message.shotDirZ, 0);
+  const shotEndX = normalizeNumber(message.shotEndX, 0);
+  const shotEndY = normalizeNumber(message.shotEndY, 0);
+  const shotEndZ = normalizeNumber(message.shotEndZ, 0);
+  const shotHasEndPoint = !!message.shotHasEndPoint;
   const reloadSeq = Math.max(0, normalizeInt64(message.reloadSeq, 0));
   const hitPlayerSeq = Math.max(0, normalizeInt64(message.hitPlayerSeq, 0));
   const footstepSeq = Math.max(0, normalizeInt64(message.footstepSeq, 0));
@@ -743,12 +752,19 @@ function handleWsPose(socket, message) {
   presence.lookPitch = lookPitch;
   presence.shotSeq = shotSeq;
   if (shotSeq > (prevPresence.shotSeq || 0)) {
-    presence.shotOriginX = shotOriginX;
-    presence.shotOriginY = shotOriginY;
-    presence.shotOriginZ = shotOriginZ;
-    presence.shotDirX = shotDirX;
-    presence.shotDirY = shotDirY;
-    presence.shotDirZ = shotDirZ;
+    recordShotEvent(ticket, {
+      seq: shotSeq,
+      shotOriginX,
+      shotOriginY,
+      shotOriginZ,
+      shotDirX,
+      shotDirY,
+      shotDirZ,
+      shotEndX,
+      shotEndY,
+      shotEndZ,
+      shotHasEndPoint,
+    });
   }
   presence.reloadSeq = reloadSeq;
   presence.hitPlayerSeq = hitPlayerSeq;
@@ -794,6 +810,105 @@ function handleWsPose(socket, message) {
   touchMatchSession(ticket.matchId);
 }
 
+function normalizeShotEvent(message) {
+  return {
+    seq: Math.max(0, normalizeInt64(message.shotSeq, 0)),
+    shotOriginX: normalizeNumber(message.shotOriginX, 0),
+    shotOriginY: normalizeNumber(message.shotOriginY, 0),
+    shotOriginZ: normalizeNumber(message.shotOriginZ, 0),
+    shotDirX: normalizeNumber(message.shotDirX, 0),
+    shotDirY: normalizeNumber(message.shotDirY, 0),
+    shotDirZ: normalizeNumber(message.shotDirZ, 0),
+    shotEndX: normalizeNumber(message.shotEndX, 0),
+    shotEndY: normalizeNumber(message.shotEndY, 0),
+    shotEndZ: normalizeNumber(message.shotEndZ, 0),
+    shotHasEndPoint: !!message.shotHasEndPoint,
+  };
+}
+
+function recordShotEvent(ticket, event) {
+  if (!ticket || !event) {
+    return false;
+  }
+
+  const seq = Math.max(0, normalizeInt64(event.seq, 0));
+  if (seq <= 0) {
+    return false;
+  }
+
+  if (!ticket.presence) {
+    ticket.presence = createDefaultPresence(currentServerTick, Date.now());
+  }
+
+  const presence = ticket.presence;
+  const prevSeq = Number.isFinite(presence.shotSeq) ? presence.shotSeq : 0;
+  if (seq < prevSeq) {
+    return false;
+  }
+
+  const record = {
+    seq,
+    shotOriginX: normalizeNumber(event.shotOriginX, 0),
+    shotOriginY: normalizeNumber(event.shotOriginY, 0),
+    shotOriginZ: normalizeNumber(event.shotOriginZ, 0),
+    shotDirX: normalizeNumber(event.shotDirX, 0),
+    shotDirY: normalizeNumber(event.shotDirY, 0),
+    shotDirZ: normalizeNumber(event.shotDirZ, 0),
+    shotEndX: normalizeNumber(event.shotEndX, 0),
+    shotEndY: normalizeNumber(event.shotEndY, 0),
+    shotEndZ: normalizeNumber(event.shotEndZ, 0),
+    shotHasEndPoint: !!event.shotHasEndPoint,
+  };
+
+  let ring = Array.isArray(presence.shotRing) ? presence.shotRing.slice() : [];
+  const existingIndex = ring.findIndex((item) => item && item.seq === seq);
+  if (existingIndex >= 0) {
+    ring[existingIndex] = record;
+  } else {
+    ring.push(record);
+    ring.sort((a, b) => (a.seq || 0) - (b.seq || 0));
+    while (ring.length > 8) {
+      ring.shift();
+    }
+  }
+  presence.shotRing = ring;
+
+  presence.shotSeq = seq;
+  presence.shotOriginX = record.shotOriginX;
+  presence.shotOriginY = record.shotOriginY;
+  presence.shotOriginZ = record.shotOriginZ;
+  presence.shotDirX = record.shotDirX;
+  presence.shotDirY = record.shotDirY;
+  presence.shotDirZ = record.shotDirZ;
+  presence.shotEndX = record.shotEndX;
+  presence.shotEndY = record.shotEndY;
+  presence.shotEndZ = record.shotEndZ;
+  presence.shotHasEndPoint = record.shotHasEndPoint;
+  return true;
+}
+
+function handleWsShot(socket, message) {
+  const meta = wsMetaBySocket.get(socket);
+  if (!meta || !meta.ticketId) {
+    return;
+  }
+
+  const ticket = ticketsById.get(meta.ticketId);
+  if (!ticket || ticket.status !== "Matched") {
+    return;
+  }
+
+  const event = normalizeShotEvent(message);
+  if (!recordShotEvent(ticket, event)) {
+    return;
+  }
+
+  touchMatchSession(ticket.matchId);
+  if (ticket.matchId) {
+    broadcastMatchSnapshots(ticket.matchId);
+  }
+}
+
 function createDefaultPresence(sampleTick, sampleTimeMs) {
   return {
     position: { x: 0, y: 0, z: 0 },
@@ -806,6 +921,11 @@ function createDefaultPresence(sampleTick, sampleTimeMs) {
     shotDirX: 0,
     shotDirY: 0,
     shotDirZ: 0,
+    shotEndX: 0,
+    shotEndY: 0,
+    shotEndZ: 0,
+    shotHasEndPoint: false,
+    shotRing: [],
     reloadSeq: 0,
     hitPlayerSeq: 0,
     footstepSeq: 0,
@@ -1231,7 +1351,7 @@ function encodeSnapshotBinary(payload) {
     const chunks = [];
     const header = Buffer.alloc(11);
     header.write("RTS1", 0, 4, "ascii");
-    header.writeUInt8(3, 4);
+    header.writeUInt8(5, 4);
     header.writeUInt32LE(payload.serverTick >>> 0, 5);
     header.writeUInt16LE(payload.serverTickRate >>> 0, 9);
     chunks.push(header);
@@ -1280,7 +1400,7 @@ function encodeSnapshotBinary(payload) {
       body.writeUInt8(Math.max(0, Math.min(2, player.jumpState || 0)), 34);
       chunks.push(body);
 
-      const meta = Buffer.alloc(80);
+      const meta = Buffer.alloc(93);
       meta.writeFloatLE(player.lookPitch || 0, 0);
       meta.writeUInt32LE((player.shotSeq || 0) >>> 0, 4);
       meta.writeUInt32LE((player.reloadSeq || 0) >>> 0, 8);
@@ -1301,7 +1421,31 @@ function encodeSnapshotBinary(payload) {
       meta.writeFloatLE(player.shotDirZ || 0, 68);
       meta.writeFloatLE(player.moveInputX || 0, 72);
       meta.writeFloatLE(player.moveInputZ || 0, 76);
+      meta.writeFloatLE(player.shotEndX || 0, 80);
+      meta.writeFloatLE(player.shotEndY || 0, 84);
+      meta.writeFloatLE(player.shotEndZ || 0, 88);
+      meta.writeUInt8(player.shotHasEndPoint ? 1 : 0, 92);
       chunks.push(meta);
+
+      const recentShots = Array.isArray(player.recentShots) ? player.recentShots.slice(-8) : [];
+      const ringCount = Math.min(255, recentShots.length);
+      chunks.push(Buffer.from([ringCount]));
+      for (let s = 0; s < ringCount; s++) {
+        const ev = recentShots[s] || {};
+        const shotBuf = Buffer.alloc(41);
+        shotBuf.writeUInt32LE((ev.seq || 0) >>> 0, 0);
+        shotBuf.writeFloatLE(ev.shotOriginX || 0, 4);
+        shotBuf.writeFloatLE(ev.shotOriginY || 0, 8);
+        shotBuf.writeFloatLE(ev.shotOriginZ || 0, 12);
+        shotBuf.writeFloatLE(ev.shotDirX || 0, 16);
+        shotBuf.writeFloatLE(ev.shotDirY || 0, 20);
+        shotBuf.writeFloatLE(ev.shotDirZ || 0, 24);
+        shotBuf.writeFloatLE(ev.shotEndX || 0, 28);
+        shotBuf.writeFloatLE(ev.shotEndY || 0, 32);
+        shotBuf.writeFloatLE(ev.shotEndZ || 0, 36);
+        shotBuf.writeUInt8(ev.shotHasEndPoint ? 1 : 0, 40);
+        chunks.push(shotBuf);
+      }
 
       const history = Array.isArray(player.history) ? player.history : [];
       const historyCount = Math.min(255, history.length);
@@ -1436,6 +1580,11 @@ function collectRealtimePlayersForMatch(matchId, ownerTicketId) {
       shotDirX: Number.isFinite(ticket.presence.shotDirX) ? ticket.presence.shotDirX : 0,
       shotDirY: Number.isFinite(ticket.presence.shotDirY) ? ticket.presence.shotDirY : 0,
       shotDirZ: Number.isFinite(ticket.presence.shotDirZ) ? ticket.presence.shotDirZ : 0,
+      shotEndX: Number.isFinite(ticket.presence.shotEndX) ? ticket.presence.shotEndX : 0,
+      shotEndY: Number.isFinite(ticket.presence.shotEndY) ? ticket.presence.shotEndY : 0,
+      shotEndZ: Number.isFinite(ticket.presence.shotEndZ) ? ticket.presence.shotEndZ : 0,
+      shotHasEndPoint: !!ticket.presence.shotHasEndPoint,
+      recentShots: Array.isArray(ticket.presence.shotRing) ? ticket.presence.shotRing.slice(-8) : [],
       reloadSeq: Number.isFinite(ticket.presence.reloadSeq) ? ticket.presence.reloadSeq : 0,
       hitPlayerSeq: Number.isFinite(ticket.presence.hitPlayerSeq) ? ticket.presence.hitPlayerSeq : 0,
       footstepSeq: Number.isFinite(ticket.presence.footstepSeq) ? ticket.presence.footstepSeq : 0,

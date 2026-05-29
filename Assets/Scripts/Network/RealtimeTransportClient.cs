@@ -26,6 +26,22 @@ namespace ShooterPrototype.Network
         }
 
         [Serializable]
+        public sealed class RealtimeShotEvent
+        {
+            public int seq;
+            public float originX;
+            public float originY;
+            public float originZ;
+            public float dirX;
+            public float dirY;
+            public float dirZ;
+            public float endX;
+            public float endY;
+            public float endZ;
+            public bool hasEndPoint;
+        }
+
+        [Serializable]
         public sealed class RealtimePlayerState
         {
             public string ticketId;
@@ -62,6 +78,11 @@ namespace ShooterPrototype.Network
             public float shotDirX;
             public float shotDirY;
             public float shotDirZ;
+            public float shotEndX;
+            public float shotEndY;
+            public float shotEndZ;
+            public bool shotHasEndPoint;
+            public RealtimeShotEvent[] recentShots;
             public RealtimeStateSample[] history;
         }
 
@@ -123,6 +144,23 @@ namespace ShooterPrototype.Network
         }
 
         [Serializable]
+        private sealed class ShotMessage
+        {
+            public string type;
+            public int shotSeq;
+            public float shotOriginX;
+            public float shotOriginY;
+            public float shotOriginZ;
+            public float shotDirX;
+            public float shotDirY;
+            public float shotDirZ;
+            public float shotEndX;
+            public float shotEndY;
+            public float shotEndZ;
+            public bool shotHasEndPoint;
+        }
+
+        [Serializable]
         public sealed class DamageMessage
         {
             public string type;
@@ -169,6 +207,10 @@ namespace ShooterPrototype.Network
             public float shotDirX;
             public float shotDirY;
             public float shotDirZ;
+            public float shotEndX;
+            public float shotEndY;
+            public float shotEndZ;
+            public bool shotHasEndPoint;
         }
 
         [Serializable]
@@ -280,7 +322,9 @@ namespace ShooterPrototype.Network
             bool jumpPressed = false,
             bool inputAuth = false,
             Vector3 shotOrigin = default,
-            Vector3 shotDirection = default)
+            Vector3 shotDirection = default,
+            Vector3 shotEndPoint = default,
+            bool shotHasEndPoint = false)
         {
             if (!IsConnected)
             {
@@ -325,6 +369,10 @@ namespace ShooterPrototype.Network
                 shotDirX = shotDirection.x,
                 shotDirY = shotDirection.y,
                 shotDirZ = shotDirection.z,
+                shotEndX = shotEndPoint.x,
+                shotEndY = shotEndPoint.y,
+                shotEndZ = shotEndPoint.z,
+                shotHasEndPoint = shotHasEndPoint,
                 poseSeq = ++nextPoseSeq
             };
             hasPendingPose = true;
@@ -428,6 +476,36 @@ namespace ShooterPrototype.Network
             {
                 sendSemaphore.Release();
             }
+        }
+
+        public void SendShotEvent(
+            int shotSeq,
+            Vector3 shotOrigin,
+            Vector3 shotDirection,
+            Vector3 shotEndPoint,
+            bool shotHasEndPoint)
+        {
+            if (!IsConnected || shotSeq <= 0)
+            {
+                return;
+            }
+
+            var direction = shotDirection.sqrMagnitude > 0.0001f ? shotDirection.normalized : Vector3.forward;
+            _ = SendJsonAsync(new ShotMessage
+            {
+                type = "shot",
+                shotSeq = Math.Max(0, shotSeq),
+                shotOriginX = shotOrigin.x,
+                shotOriginY = shotOrigin.y,
+                shotOriginZ = shotOrigin.z,
+                shotDirX = direction.x,
+                shotDirY = direction.y,
+                shotDirZ = direction.z,
+                shotEndX = shotEndPoint.x,
+                shotEndY = shotEndPoint.y,
+                shotEndZ = shotEndPoint.z,
+                shotHasEndPoint = shotHasEndPoint
+            }, cts != null ? cts.Token : CancellationToken.None);
         }
 
         public void SendHit(

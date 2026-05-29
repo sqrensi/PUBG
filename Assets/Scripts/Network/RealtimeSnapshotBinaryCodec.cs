@@ -27,7 +27,7 @@ namespace ShooterPrototype.Network
 
             var offset = 4;
             var version = ReadU8(data, ref offset);
-            if (version != 1 && version != 2 && version != 3)
+            if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5)
             {
                 return false;
             }
@@ -96,7 +96,7 @@ namespace ShooterPrototype.Network
                 var flags2 = ReadU16(data, ref offset);
                 var jumpState = ReadU8(data, ref offset);
 
-                if (offset + (version >= 3 ? 80 : version >= 2 ? 72 : 48) > data.Length)
+                if (offset + (version >= 4 ? 93 : version >= 3 ? 80 : version >= 2 ? 72 : 48) > data.Length)
                 {
                     return false;
                 }
@@ -119,6 +119,10 @@ namespace ShooterPrototype.Network
                 var shotDirX = 0f;
                 var shotDirY = 0f;
                 var shotDirZ = 0f;
+                var shotEndX = 0f;
+                var shotEndY = 0f;
+                var shotEndZ = 0f;
+                var shotHasEndPoint = false;
                 var moveInputX = 0f;
                 var moveInputZ = 0f;
                 if (version >= 2)
@@ -145,6 +149,56 @@ namespace ShooterPrototype.Network
 
                     moveInputX = ReadF32(data, ref offset);
                     moveInputZ = ReadF32(data, ref offset);
+                }
+
+                if (version >= 4)
+                {
+                    if (offset + 13 > data.Length)
+                    {
+                        return false;
+                    }
+
+                    shotEndX = ReadF32(data, ref offset);
+                    shotEndY = ReadF32(data, ref offset);
+                    shotEndZ = ReadF32(data, ref offset);
+                    shotHasEndPoint = ReadU8(data, ref offset) != 0;
+                }
+
+                RealtimeTransportClient.RealtimeShotEvent[] recentShots = null;
+                if (version >= 5)
+                {
+                    if (offset >= data.Length)
+                    {
+                        return false;
+                    }
+
+                    var ringCount = ReadU8(data, ref offset);
+                    if (ringCount > 0)
+                    {
+                        if (offset + ringCount * 41 > data.Length)
+                        {
+                            return false;
+                        }
+
+                        recentShots = new RealtimeTransportClient.RealtimeShotEvent[ringCount];
+                        for (var s = 0; s < ringCount; s++)
+                        {
+                            recentShots[s] = new RealtimeTransportClient.RealtimeShotEvent
+                            {
+                                seq = (int)ReadU32(data, ref offset),
+                                originX = ReadF32(data, ref offset),
+                                originY = ReadF32(data, ref offset),
+                                originZ = ReadF32(data, ref offset),
+                                dirX = ReadF32(data, ref offset),
+                                dirY = ReadF32(data, ref offset),
+                                dirZ = ReadF32(data, ref offset),
+                                endX = ReadF32(data, ref offset),
+                                endY = ReadF32(data, ref offset),
+                                endZ = ReadF32(data, ref offset),
+                                hasEndPoint = ReadU8(data, ref offset) != 0
+                            };
+                        }
+                    }
                 }
 
                 if (offset >= data.Length)
@@ -206,6 +260,11 @@ namespace ShooterPrototype.Network
                     shotDirX = shotDirX,
                     shotDirY = shotDirY,
                     shotDirZ = shotDirZ,
+                    shotEndX = shotEndX,
+                    shotEndY = shotEndY,
+                    shotEndZ = shotEndZ,
+                    shotHasEndPoint = shotHasEndPoint,
+                    recentShots = recentShots,
                     isDead = (flags2 & 1) != 0,
                     isGrounded = (flags2 & 2) != 0,
                     isCrouching = (flags2 & 4) != 0,
